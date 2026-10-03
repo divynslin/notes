@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>日記與經驗</title>
+<style>
+  :root { --bg:#fafaf9; --fg:#1c1917; --muted:#78716c; --line:#e7e5e4; --card:#fff; --accent:#b91c1c; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#1c1917; --fg:#e7e5e4; --muted:#a8a29e; --line:#44403c; --card:#292524; --accent:#f87171; }
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg);
+         font:16px/1.6 system-ui, "Segoe UI", "Microsoft JhengHei", sans-serif; }
+  main { max-width:1100px; margin:0 auto; padding:24px 16px 48px; }
+  header { display:flex; flex-wrap:wrap; gap:12px; align-items:center; justify-content:space-between; margin-bottom:12px; }
+  h1 { font-size:1.4rem; margin:0; }
+  input[type=search] { flex:1; max-width:360px; min-width:200px; padding:8px 12px; font:inherit;
+         border:1px solid var(--line); border-radius:8px; background:var(--card); color:var(--fg); }
+  .tabs { display:flex; gap:4px; flex-wrap:wrap; border-bottom:1px solid var(--line); margin-bottom:4px; }
+  .tabs button { font:inherit; padding:8px 14px; border:0; background:transparent; color:var(--muted);
+                 cursor:pointer; border-bottom:2px solid transparent; margin-bottom:-1px; }
+  .tabs button:hover { color:var(--fg); }
+  .tabs button[aria-selected="true"] { color:var(--accent); border-bottom-color:var(--accent); font-weight:600; }
+  .tabs .n { font-size:.8rem; margin-left:4px; opacity:.8; }
+  .list { list-style:none; margin:0; padding:0; }
+  .list li { border-bottom:1px solid var(--line); }
+  .list a { display:block; padding:12px 4px; color:inherit; text-decoration:none; }
+  .list a:hover .title { color:var(--accent); }
+  .title { font-weight:600; line-height:1.4; overflow-wrap:anywhere; }
+  .sub { color:var(--muted); font-size:.9rem; margin-top:2px; }
+  .cat { display:inline-block; font-size:.75rem; padding:0 6px; margin-right:6px; border-radius:4px;
+         border:1px solid var(--line); color:var(--muted); }
+  .empty { color:var(--muted); padding:16px 4px; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>日記與經驗</h1>
+    <input type="search" id="q" placeholder="搜尋標題、說話者…">
+  </header>
+  <nav class="tabs" id="tabs" role="tablist"></nav>
+  <ul class="list" id="list"></ul>
+</main>
+<script>
+const ITEMS = [];
+const CATS = ["全部", "日記", "經驗"];
+const esc = s => String(s).replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const href = dir => dir.split("/").map(encodeURIComponent).join("/") + "/index.html";
+const tabs = document.getElementById("tabs"), ul = document.getElementById("list"), q = document.getElementById("q");
+// 目前分類記在網址的 # 後面（例如 index.html#日記），重新整理或分享連結都會停在同一個分類
+let cat = CATS.includes(decodeURIComponent(location.hash.slice(1))) ? decodeURIComponent(location.hash.slice(1)) : "全部";
+
+if (CATS.length <= 2) { tabs.hidden = true; cat = "全部"; }  // 只有一種分類時不需要 tab
+function render() {
+  const text = q.value.trim().toLowerCase();
+  tabs.innerHTML = CATS.map(c => {
+    const n = c === "全部" ? ITEMS.length : ITEMS.filter(it => it.cat === c).length;
+    return `<button role="tab" data-cat="${c}" aria-selected="${c === cat}">${c}<span class="n">${n}</span></button>`;
+  }).join("");
+  const list = ITEMS.filter(it => (cat === "全部" || it.cat === cat) &&
+    (!text || (it.title + " " + it.sub).toLowerCase().includes(text)));
+  ul.innerHTML = list.length ? list.map(it => `
+    <li><a href="${href(it.dir)}">
+      <div class="title">${esc(it.title)}</div>
+      <div class="sub">${cat === "全部" && !tabs.hidden ? `<span class="cat">${esc(it.cat)}</span>` : ""}${esc(it.sub)}</div>
+    </a></li>`).join("") : `<li class="empty">${text ? "沒有符合的項目。" : "這個分類還沒有內容。"}</li>`;
+}
+tabs.addEventListener("click", e => {
+  const b = e.target.closest("button"); if (!b) return;
+  cat = b.dataset.cat;
+  history.replaceState(null, "", cat === "全部" ? location.pathname : "#" + encodeURIComponent(cat));
+  render();
+});
+q.addEventListener("input", render);
+render();
+</script>
+</body>
+</html>
