@@ -11,7 +11,7 @@
   "vars": {
     "GITHUB_REPO": "divynslin/notes",
     "ACCESS_TEAM": "square-scene-f39f",  // <team>.cloudflareaccess.com 的 <team>
-    "ACCESS_AUD": ""  // 保護 /admin 的 Access 應用程式的 Application Audience (AUD) Tag
+    "ACCESS_AUD": "84bac7045b683afb6f8b476efb178e74ce7da1de353c408c64ab7350e49050ef"  // 保護 /admin 的 Access 應用程式的 Application Audience (AUD) Tag
   }
   // GITHUB_TOKEN 不寫在這裡：在後台 Worker → Settings → Variables and Secrets 加成 Secret
 }
