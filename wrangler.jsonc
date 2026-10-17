@@ -1,0 +1,17 @@
+// Cloudflare Worker 設定（Workers Builds 每次 push 會先執行 build.py 產生 public/，再執行 npx wrangler deploy）
+{
+  "name": "notes",  // 要和 Cloudflare 後台的 Worker 名稱相同
+  "main": "worker.js",
+  "compatibility_date": "2026-10-01",
+  "assets": {
+    "directory": "./public",
+    "binding": "ASSETS",
+    "run_worker_first": ["/admin/api/*"]  // 只有編輯 API 會執行 worker.js，其他都是靜態檔案
+  },
+  "vars": {
+    "GITHUB_REPO": "divynslin/notes",
+    "ACCESS_TEAM": "square-scene-f39f",  // <team>.cloudflareaccess.com 的 <team>
+    "ACCESS_AUD": ""  // 保護 /admin 的 Access 應用程式的 Application Audience (AUD) Tag
+  }
+  // GITHUB_TOKEN 不寫在這裡：在後台 Worker → Settings → Variables and Secrets 加成 Secret
+}

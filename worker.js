@@ -1,17 +1,13 @@
-// 線上編輯頁 /admin/ 的 API（Cloudflare Pages Function）：
+// Cloudflare Worker：網站的靜態檔案在 public/（由 build.py 產生），這支程式只處理線上編輯頁 /admin/ 的 API：
 //   GET  /admin/api/entries   讀取所有動態
 //   POST /admin/api/save      新增或修改一則（{id, ver, date, time, body}，新增時 id 為空）
 //   POST /admin/api/delete    刪除一則（{id, ver}）
-// 透過 GitHub API 讀寫 _src/動態/*.md，每次存檔就是一個 commit，Cloudflare Pages 會自動重新部署。
+// 透過 GitHub API 讀寫 _src/動態/*.md，每次存檔就是一個 commit，Workers Builds 會自動重新部署。
 // 解析與改寫原稿的規則和 build.py 的 ENTRY_RE / load_entries / save_entry / delete_entry 相同，要一起改。
 //
-// 環境變數（Cloudflare Pages → 專案 → Settings → Variables and Secrets，設定方式見 README.md）：
-//   GITHUB_TOKEN   只能讀寫這個 repo 內容的 fine-grained token（類型選 Secret）
-//   GITHUB_REPO    例如 divynslin/notes
-//   ACCESS_TEAM    Cloudflare Zero Trust 的 team name（<team>.cloudflareaccess.com 的 <team>）
-//   ACCESS_AUD     保護 /admin 的 Access 應用程式的 Application Audience (AUD) Tag
-//   GITHUB_BRANCH  選填，預設 main
-// 每個請求都會驗證 Access 的登入憑證（JWT），所以就算某個網址（例如預覽部署）沒被 Access 擋住，
+// 設定：GITHUB_REPO、ACCESS_TEAM、ACCESS_AUD 寫在 wrangler.jsonc 的 vars；
+// GITHUB_TOKEN（只能讀寫這個 repo 內容的 fine-grained token）要在 Cloudflare 後台加成 Secret（見 README.md）。
+// 每個請求都會驗證 Cloudflare Access 的登入憑證（JWT），所以就算某個網址（例如預覽網址）沒被 Access 擋住，
 // 沒登入的人也改不了。
 
 const SRC = "_src/動態";
@@ -24,29 +20,34 @@ const json = (obj, status = 200) => new Response(JSON.stringify(obj), {
   status, headers: {"Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store"},
 });
 
-export async function onRequest({request, env, params}) {
-  const action = [].concat(params.path || []).join("/");
-  try {
-    if (!await accessEmail(request, env)) return json({error: "沒有登入，或登入已過期，請重新整理頁面"}, 403);
-    const gh = github(env);
-    if (request.method === "GET" && action === "entries") {
-      const entries = (await loadEntries(gh)).map(({id, date, time, body, ver}) => ({id, date, time, body, ver}));
-      return json({mode: "online", entries});
+export default {
+  async fetch(request, env) {
+    const path = new URL(request.url).pathname;
+    // wrangler.jsonc 的 run_worker_first 只讓 /admin/api/* 進到這裡；其他網址直接由 public/ 的靜態檔案回應
+    if (!path.startsWith("/admin/api/")) return env.ASSETS.fetch(request);
+    const action = path.slice("/admin/api/".length);
+    try {
+      if (!await accessEmail(request, env)) return json({error: "沒有登入，或登入已過期，請重新整理頁面"}, 403);
+      const gh = github(env);
+      if (request.method === "GET" && action === "entries") {
+        const entries = (await loadEntries(gh)).map(({id, date, time, body, ver}) => ({id, date, time, body, ver}));
+        return json({mode: "online", entries});
+      }
+      if (request.method === "POST" && (action === "save" || action === "delete")) {
+        // 只接受編輯頁送來的 JSON（其他網站沒辦法跨站送這種請求）
+        if (!(request.headers.get("Content-Type") || "").startsWith("application/json")) return json({error: "拒絕"}, 403);
+        const data = await request.json().catch(() => { throw new UserError("資料格式不對"); });
+        if (action === "save") await saveEntry(gh, data);
+        else await deleteEntry(gh, data);
+        return json({ok: true});
+      }
+      return json({error: "找不到"}, 404);
+    } catch (err) {
+      if (err instanceof UserError) return json({error: err.message}, 400);
+      return json({error: "伺服器錯誤：" + err.message}, 500);
     }
-    if (request.method === "POST" && (action === "save" || action === "delete")) {
-      // 只接受編輯頁送來的 JSON（其他網站沒辦法跨站送這種請求）
-      if (!(request.headers.get("Content-Type") || "").startsWith("application/json")) return json({error: "拒絕"}, 403);
-      const data = await request.json().catch(() => { throw new UserError("資料格式不對"); });
-      if (action === "save") await saveEntry(gh, data);
-      else await deleteEntry(gh, data);
-      return json({ok: true});
-    }
-    return json({error: "找不到"}, 404);
-  } catch (err) {
-    if (err instanceof UserError) return json({error: err.message}, 400);
-    return json({error: "伺服器錯誤：" + err.message}, 500);
-  }
-}
+  },
+};
 
 // ---- Cloudflare Access 登入驗證 ----
 

@@ -1,14 +1,14 @@
 """AI操作員（動態牆）：把原稿 _src/動態/*.md 產生成靜態網站 public/，也能在本機新增、修改、刪除動態。
 
 用法（在哪個資料夾執行都可以）:
-    python build.py                 產生 public/（Cloudflare Pages 每次部署也是執行這行）
+    python build.py                 產生 public/（Cloudflare 每次部署也是先執行這行）
     python build.py --edit          在本機用瀏覽器編輯動態（http://localhost:8000/admin/），改完要 commit、push 才會上線
     python build.py --say 內容      用現在的時間發一則動態，並重新產生 public/
 
 原稿 _src/動態/<年>.md：每則以「## 2026-10-11」或「## 2026-10-11 21:30」開頭，到下一個同樣格式的標題為止，
 內文是一般 Markdown；檔案裡的先後順序不重要，網頁上新的排前面。
 
-線上編輯頁 /admin/ 呼叫 functions/admin/api/[[path]].js，透過 GitHub API 改原稿（設定方式見 README.md）。
+線上編輯頁 /admin/ 呼叫 worker.js（Cloudflare Worker），透過 GitHub API 改原稿（設定方式見 README.md）。
 解析與改寫原稿的規則在那支 JS 裡也有一份，改這裡的 ENTRY_RE / load_entries / save_entry / delete_entry 時要一起改。
 """
 import hashlib
@@ -26,7 +26,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 SRC = ROOT / "_src" / "動態"  # 動態原稿
-OUT = ROOT / "public"  # 產生的網站（不進 git；Cloudflare Pages 的 Build output directory）
+OUT = ROOT / "public"  # 產生的網站（不進 git；wrangler.jsonc 的 assets.directory）
 TITLE = "AI操作員"  # 網站名稱
 
 PAGE_TEMPLATE = """<!DOCTYPE html>
@@ -117,7 +117,7 @@ filter();
 """
 
 # 編輯頁 public/admin/index.html：本機（--edit）和線上（Cloudflare Access 保護）共用，
-# 資料都從 /admin/api/ 讀寫——本機由下面的 Editor 處理，線上由 functions/admin/api/[[path]].js 處理
+# 資料都從 /admin/api/ 讀寫——本機由下面的 Editor 處理，線上由 worker.js 處理
 ADMIN_TEMPLATE = r"""<!DOCTYPE html>
 <html lang="zh-Hant">
 <head>
