@@ -16,7 +16,11 @@
 
 ## 留言板（Disqus）
 
-- **開關：** `build.py` 裡的 `DISQUS_SHORTNAME` 填了 Disqus 的網站代號，網站上方才會出現「留言板」分頁，網址是 `/guestbook/`。留空就不顯示。
+- **開關：** `build.py` 裡的 `DISQUS_SHORTNAME` 填了 Disqus 的網站代號，才會出現下面兩種留言。留空就都不顯示。
+  - **留言板：** 網站上方的「留言板」分頁，網址是 `/guestbook/`。
+  - **每則動態的留言：** 每則下面有「留言」連結，點了會到這則的專屬頁面 `/post/<日期時間>/`，留言串在那一頁。
+- **每則的留言是用日期時間對應的：** 修改動態的**日期或時間**後，它的網址會變，舊留言還留在 Disqus，但不會再顯示在這則下面。只改內文沒關係。
+- **留言數的文字：** 在 Disqus 後台 Settings → Community → Comment Count Link 設定，例如「留言」「1 則留言」「{num} 則留言」。
 - **管理留言：** 登入 disqus.com，進入網站的管理後台（Moderation），可以刪除留言或封鎖留言者。
 - **建議的 Disqus 設定：** 在 Settings → Advanced → Trusted Domains 填 `notes.abee-lin-tw.workers.dev`，避免別人把你的留言板嵌到他們的網站。
 

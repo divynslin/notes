@@ -15,6 +15,7 @@ import hashlib
 import html
 import json
 import re
+import shutil
 import sys
 import threading
 import urllib.parse
@@ -29,7 +30,7 @@ SRC = ROOT / "_src" / "動態"  # 動態原稿
 OUT = ROOT / "public"  # 產生的網站（不進 git；wrangler.jsonc 的 assets.directory）
 TITLE = "AI操作員"  # 網站名稱
 SITE_URL = "https://notes.abee-lin-tw.workers.dev"  # 網站的正式網址（留言板用來對應留言串）
-DISQUS_SHORTNAME = "ai-operator"  # Disqus 網站代號（disqus.com 註冊時取的）；空的就不顯示留言板
+DISQUS_SHORTNAME = "ai-operator"  # Disqus 網站代號（disqus.com 註冊時取的）；空的就不顯示留言板和每則的留言
 
 STYLE = """<style>
   :root { --bg:#fafaf9; --fg:#1c1917; --muted:#78716c; --line:#e7e5e4; --code:#f5f5f4; --accent:#b91c1c; --hl:#fef3c7; }
@@ -71,6 +72,12 @@ STYLE = """<style>
   .body pre code { padding:0; background:none; }
   .empty { color:var(--muted); padding:24px 0; }
   .intro { color:var(--muted); margin:24px 0 8px; }
+  .foot { margin-top:6px; font-size:.85rem; }
+  .foot a { color:var(--muted); text-decoration:none; }
+  .foot a:hover { color:var(--accent); text-decoration:underline; }
+  .back { margin:20px 0 4px; font-size:.9rem; }
+  .back a { color:var(--accent); text-decoration:none; }
+  .cmt-h { font-size:1rem; margin:36px 0 8px; }
   @media (max-width: 600px) { .bar { padding:10px 16px 0; } main { padding:0 16px 30vh; } }
 </style>
 """
@@ -94,7 +101,27 @@ __ENTRIES__
 <p class="empty" id="none" hidden></p>
 </main>
 <script>
-// 把 <span class="ago" data-t="2026-10-11T21:30"> 填成「2 小時前」「昨天」，依打開網頁當下的時間計算
+__AGO_JS__
+
+const q = document.getElementById("q"), none = document.getElementById("none");
+const entries = [...document.querySelectorAll(".entry")], months = [...document.querySelectorAll(".month")];
+function filter() {
+  const t = q.value.trim().toLowerCase();
+  entries.forEach(e => e.hidden = !!t && !(e.querySelector(".when").firstChild.textContent + " "
+                                           + e.querySelector(".body").textContent).toLowerCase().includes(t));
+  months.forEach(m => m.hidden = !m.querySelector(".entry:not([hidden])"));
+  none.textContent = entries.length ? "沒有符合的動態。" : "還沒有動態。";
+  none.hidden = months.some(m => !m.hidden);
+}
+q.addEventListener("input", filter);
+filter();
+</script>
+__COUNT_JS__
+</body>
+</html>
+"""
+
+AGO_JS = """// 把 <span class="ago" data-t="2026-10-11T21:30"> 填成「2 小時前」「昨天」，依打開網頁當下的時間計算
 function ago(t) {
   const now = new Date(), d = new Date(t.length > 10 ? t : t + "T00:00"), min = Math.floor((now - d) / 6e4);
   if (min < 0) return "";
@@ -106,19 +133,49 @@ function ago(t) {
        : days < 365 ? Math.floor(days / 30) + " 個月前" : Math.floor(days / 365) + " 年前";
 }
 document.querySelectorAll(".ago[data-t]").forEach(el => el.textContent = ago(el.dataset.t));
+"""
 
-const q = document.getElementById("q"), none = document.getElementById("none");
-const entries = [...document.querySelectorAll(".entry")], months = [...document.querySelectorAll(".month")];
-function filter() {
-  const t = q.value.trim().toLowerCase();
-  entries.forEach(e => e.hidden = !!t && !e.textContent.toLowerCase().includes(t));
-  months.forEach(m => m.hidden = !m.querySelector(".entry:not([hidden])"));
-  none.textContent = entries.length ? "沒有符合的動態。" : "還沒有動態。";
-  none.hidden = months.some(m => !m.hidden);
-}
-q.addEventListener("input", filter);
-filter();
-</script>
+# Disqus 留言串（留言板和每則動態共用）；每個留言串用 identifier 區分，網址只是 Disqus 顯示用
+DISQUS_EMBED = """<div id="disqus_thread"></div>
+<noscript>要開啟 JavaScript 才看得到留言。</noscript>
+<script>
+var disqus_config = function () {
+  this.page.url = __URL__;
+  this.page.identifier = __IDENT__;
+  this.page.title = __PTITLE__;
+  this.language = "zh_TW";
+};
+(function () {
+  var s = document.createElement("script");
+  s.src = "https://__SHORTNAME__.disqus.com/embed.js";
+  s.setAttribute("data-timestamp", +new Date());
+  (document.head || document.body).appendChild(s);
+})();
+</script>"""
+
+# 單則動態 public/post/<id>/index.html：全文 + 這則的留言（設定 DISQUS_SHORTNAME 才會產生）
+POST_TEMPLATE = """<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>__PTITLE__ · __HEADING__</title>
+<meta name="description" content="__DESC__">
+__STYLE__
+</head>
+<body>
+<header><div class="bar">
+  <h1>__HEADING__</h1>
+  <nav class="tabs">__TABS__</nav>
+</div></header>
+<main>
+<p class="back"><a href="../../index.html#__ID__">← 回到動態</a></p>
+__ENTRY__
+<h2 class="cmt-h">留言</h2>
+__DISQUS__
+</main>
+<script>
+__AGO_JS__</script>
 </body>
 </html>
 """
@@ -139,21 +196,7 @@ __STYLE__
 </div></header>
 <main>
 <p class="intro">歡迎留言交流。留言由 Disqus 提供，可以用 Disqus、Google、Facebook 等帳號登入後留言。</p>
-<div id="disqus_thread"></div>
-<noscript>要開啟 JavaScript 才看得到留言。</noscript>
-<script>
-var disqus_config = function () {
-  this.page.url = "__URL__";
-  this.page.identifier = "guestbook";
-  this.language = "zh_TW";
-};
-(function () {
-  var s = document.createElement("script");
-  s.src = "https://__SHORTNAME__.disqus.com/embed.js";
-  s.setAttribute("data-timestamp", +new Date());
-  (document.head || document.body).appendChild(s);
-})();
-</script>
+__DISQUS__
 </main>
 </body>
 </html>
@@ -389,7 +432,9 @@ def tabs(current, prefix, count):
 
 
 def build():
-    """產生 public/index.html（動態牆，新的排前面）與 public/admin/index.html（編輯頁）。"""
+    """產生 public/index.html（動態牆，新的排前面）、public/admin/index.html（編輯頁），
+    有設定 Disqus 時再加上 public/post/<id>/index.html（每則動態的留言）與 public/guestbook/index.html（留言板）。
+    每則留言串的 identifier 是「entry-<動態 id>」，動態 id 由日期時間組成，所以改了動態的日期時間，舊留言就對不上了。"""
     import markdown
 
     SRC.mkdir(parents=True, exist_ok=True)
@@ -405,32 +450,65 @@ def build():
         })
     entries.sort(key=lambda e: e["t"], reverse=True)
 
+    def article(e, when, foot=""):
+        return (f'<article class="entry" id="{e["id"]}"><div class="when">{when}'
+                f'<span class="ago" data-t="{e["t"]}"></span></div>\n<div class="body">{e["html"]}</div>{foot}</article>\n')
+
+    def comments_link(e):
+        # Disqus 的 count.js 會把連結文字換成留言數（文字在 Disqus 後台 Community → Comment Count Link 設定）
+        if not DISQUS_SHORTNAME:
+            return ""
+        return (f'<div class="foot"><a href="post/{e["id"]}/index.html#disqus_thread" '
+                f'data-disqus-identifier="entry-{e["id"]}">留言</a></div>')
+
     months = []
     for ym, group in groupby(entries, key=lambda e: e["t"][:7]):
         y, m = ym.split("-")
-        items = "".join(
-            f'<article class="entry" id="{e["id"]}"><div class="when"><a href="#{e["id"]}">{e["label"]}</a>'
-            f'<span class="ago" data-t="{e["t"]}"></span></div>\n<div class="body">{e["html"]}</div></article>\n'
-            for e in group
-        )
+        items = "".join(article(e, f'<a href="#{e["id"]}">{e["label"]}</a>', comments_link(e)) for e in group)
         months.append(f'<section class="month"><h2>{y} 年 {int(m)} 月</h2>\n{items}</section>')
+    count_js = (f'<script id="dsq-count-scr" src="https://{DISQUS_SHORTNAME}.disqus.com/count.js" async></script>'
+                if DISQUS_SHORTNAME else "")
     page = (
         PAGE_TEMPLATE.replace("__STYLE__", STYLE)
         .replace("__HEADING__", html.escape(TITLE))
         .replace("__TABS__", tabs("動態", "", len(entries)))
         .replace("__ENTRIES__", "\n".join(months))
+        .replace("__AGO_JS__", AGO_JS)
+        .replace("__COUNT_JS__", count_js)
     )
     (OUT / "admin").mkdir(parents=True, exist_ok=True)
     (OUT / "index.html").write_text(page, "utf-8")
+
+    def disqus(url, ident, title):
+        js = lambda v: json.dumps(v, ensure_ascii=False).replace("</", "<\\/")
+        return (DISQUS_EMBED.replace("__URL__", js(url)).replace("__IDENT__", js(ident))
+                .replace("__PTITLE__", js(title)).replace("__SHORTNAME__", DISQUS_SHORTNAME))
+
+    # 單則頁面每次整個重建（刪掉的動態，頁面也會一起消失；留言還留在 Disqus）
+    shutil.rmtree(OUT / "post", ignore_errors=True)
     guestbook = OUT / "guestbook" / "index.html"
     if DISQUS_SHORTNAME:
+        for e in entries:
+            text = " ".join(html.unescape(re.sub(r"<[^>]+>", " ", e["html"])).split())
+            short = text[:30] + ("…" if len(text) > 30 else "")
+            post = OUT / "post" / e["id"] / "index.html"
+            post.parent.mkdir(parents=True, exist_ok=True)
+            post.write_text(
+                POST_TEMPLATE.replace("__STYLE__", STYLE)
+                .replace("__HEADING__", html.escape(TITLE))
+                .replace("__TABS__", tabs("動態", "../../", len(entries)))
+                .replace("__PTITLE__", html.escape(short))
+                .replace("__DESC__", html.escape(text[:120]))
+                .replace("__ID__", e["id"])
+                .replace("__ENTRY__", article(e, e["label"]))
+                .replace("__DISQUS__", disqus(f"{SITE_URL}/post/{e['id']}/", f"entry-{e['id']}", f"{short} · {TITLE}"))
+                .replace("__AGO_JS__", AGO_JS), "utf-8")
         guestbook.parent.mkdir(exist_ok=True)
         guestbook.write_text(
             GUESTBOOK_TEMPLATE.replace("__STYLE__", STYLE)
             .replace("__HEADING__", html.escape(TITLE))
             .replace("__TABS__", tabs("留言板", "../", len(entries)))
-            .replace("__URL__", f"{SITE_URL}/guestbook/")
-            .replace("__SHORTNAME__", DISQUS_SHORTNAME), "utf-8")
+            .replace("__DISQUS__", disqus(f"{SITE_URL}/guestbook/", "guestbook", f"留言板 · {TITLE}")), "utf-8")
     else:
         guestbook.unlink(missing_ok=True)
     (OUT / "admin" / "index.html").write_text(ADMIN_TEMPLATE.replace("__HEADING__", html.escape(TITLE)), "utf-8")
