@@ -28,15 +28,10 @@ ROOT = Path(__file__).resolve().parent
 SRC = ROOT / "_src" / "動態"  # 動態原稿
 OUT = ROOT / "public"  # 產生的網站（不進 git；wrangler.jsonc 的 assets.directory）
 TITLE = "AI操作員"  # 網站名稱
+SITE_URL = "https://notes.abee-lin-tw.workers.dev"  # 網站的正式網址（留言板用來對應留言串）
+DISQUS_SHORTNAME = ""  # Disqus 網站代號（disqus.com 註冊時取的）；空的就不顯示留言板
 
-PAGE_TEMPLATE = """<!DOCTYPE html>
-<html lang="zh-Hant">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="robots" content="noindex">
-<title>__HEADING__</title>
-<style>
+STYLE = """<style>
   :root { --bg:#fafaf9; --fg:#1c1917; --muted:#78716c; --line:#e7e5e4; --code:#f5f5f4; --accent:#b91c1c; --hl:#fef3c7; }
   @media (prefers-color-scheme: dark) {
     :root { --bg:#1c1917; --fg:#e7e5e4; --muted:#a8a29e; --line:#44403c; --code:#292524; --accent:#f87171; --hl:#3f2a12; }
@@ -51,7 +46,9 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
   input[type=search] { flex:1; max-width:280px; min-width:160px; padding:5px 10px; font:inherit; font-size:.9rem;
          border:1px solid var(--line); border-radius:8px; background:var(--bg); color:var(--fg); }
   .tabs { flex-basis:100%; display:flex; }
-  .tab { padding:2px 14px 8px; margin-bottom:-1px; color:var(--accent); font-weight:600; border-bottom:2px solid var(--accent); }
+  .tab { padding:2px 14px 8px; margin-bottom:-1px; color:var(--muted); text-decoration:none; border-bottom:2px solid transparent; }
+  .tab:hover { color:var(--fg); }
+  .tab[aria-current] { color:var(--accent); font-weight:600; border-bottom-color:var(--accent); }
   .tab .n { font-size:.8rem; font-weight:normal; margin-left:4px; opacity:.8; }
   main { max-width:760px; margin:0 auto; padding:0 24px 30vh; }
   .month h2 { font-size:.85rem; font-weight:600; color:var(--muted); margin:28px 0 0; }
@@ -73,14 +70,24 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
   .body pre { background:var(--code); padding:12px 16px; border-radius:6px; overflow-x:auto; }
   .body pre code { padding:0; background:none; }
   .empty { color:var(--muted); padding:24px 0; }
+  .intro { color:var(--muted); margin:24px 0 8px; }
   @media (max-width: 600px) { .bar { padding:10px 16px 0; } main { padding:0 16px 30vh; } }
 </style>
+"""
+
+PAGE_TEMPLATE = """<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>__HEADING__</title>
+__STYLE__
 </head>
 <body>
 <header><div class="bar">
   <h1>__HEADING__</h1>
   <input type="search" id="q" placeholder="搜尋動態…">
-  <nav class="tabs"><span class="tab">動態<span class="n">__COUNT__</span></span></nav>
+  <nav class="tabs">__TABS__</nav>
 </div></header>
 <main>
 __ENTRIES__
@@ -112,6 +119,42 @@ function filter() {
 q.addEventListener("input", filter);
 filter();
 </script>
+</body>
+</html>
+"""
+
+# 留言板 public/guestbook/index.html：留言由 Disqus 代管（設定 DISQUS_SHORTNAME 才會產生）
+GUESTBOOK_TEMPLATE = """<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>留言板 · __HEADING__</title>
+__STYLE__
+</head>
+<body>
+<header><div class="bar">
+  <h1>__HEADING__</h1>
+  <nav class="tabs">__TABS__</nav>
+</div></header>
+<main>
+<p class="intro">歡迎留言交流。留言由 Disqus 提供，可以用 Disqus、Google、Facebook 等帳號登入後留言。</p>
+<div id="disqus_thread"></div>
+<noscript>要開啟 JavaScript 才看得到留言。</noscript>
+<script>
+var disqus_config = function () {
+  this.page.url = "__URL__";
+  this.page.identifier = "guestbook";
+  this.language = "zh_TW";
+};
+(function () {
+  var s = document.createElement("script");
+  s.src = "https://__SHORTNAME__.disqus.com/embed.js";
+  s.setAttribute("data-timestamp", +new Date());
+  (document.head || document.body).appendChild(s);
+})();
+</script>
+</main>
 </body>
 </html>
 """
@@ -334,6 +377,17 @@ def load_entries():
     return entries
 
 
+def tabs(current, prefix, count):
+    """網頁上方的分頁列；prefix 是回到網站根目錄的相對路徑（直接雙擊用 file:// 打開也能換頁）。"""
+    items = [("動態", "index.html", f'<span class="n">{count}</span>')]
+    if DISQUS_SHORTNAME:
+        items.append(("留言板", "guestbook/index.html", ""))
+    return "".join(
+        f'<a class="tab" href="{prefix}{href}"' + (' aria-current="page"' if name == current else "") + f'>{name}{extra}</a>'
+        for name, href, extra in items
+    )
+
+
 def build():
     """產生 public/index.html（動態牆，新的排前面）與 public/admin/index.html（編輯頁）。"""
     import markdown
@@ -361,12 +415,24 @@ def build():
         )
         months.append(f'<section class="month"><h2>{y} 年 {int(m)} 月</h2>\n{items}</section>')
     page = (
-        PAGE_TEMPLATE.replace("__HEADING__", html.escape(TITLE))
-        .replace("__COUNT__", str(len(entries)))
+        PAGE_TEMPLATE.replace("__STYLE__", STYLE)
+        .replace("__HEADING__", html.escape(TITLE))
+        .replace("__TABS__", tabs("動態", "", len(entries)))
         .replace("__ENTRIES__", "\n".join(months))
     )
     (OUT / "admin").mkdir(parents=True, exist_ok=True)
     (OUT / "index.html").write_text(page, "utf-8")
+    guestbook = OUT / "guestbook" / "index.html"
+    if DISQUS_SHORTNAME:
+        guestbook.parent.mkdir(exist_ok=True)
+        guestbook.write_text(
+            GUESTBOOK_TEMPLATE.replace("__STYLE__", STYLE)
+            .replace("__HEADING__", html.escape(TITLE))
+            .replace("__TABS__", tabs("留言板", "../", len(entries)))
+            .replace("__URL__", f"{SITE_URL}/guestbook/")
+            .replace("__SHORTNAME__", DISQUS_SHORTNAME), "utf-8")
+    else:
+        guestbook.unlink(missing_ok=True)
     (OUT / "admin" / "index.html").write_text(ADMIN_TEMPLATE.replace("__HEADING__", html.escape(TITLE)), "utf-8")
     print(f"已產生: {OUT / 'index.html'}（{len(entries)} 則動態）")
 

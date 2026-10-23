@@ -14,6 +14,17 @@
   改完要 commit、push 才會上線。
 - **直接改原稿：** 每則以 `## 2026-10-17` 或 `## 2026-10-17 21:30` 開頭，內文用一般的 Markdown 寫。改完執行 `python build.py`，就能在 `public/index.html` 預覽。
 
+## 留言板（Disqus）
+
+- **開關：** `build.py` 裡的 `DISQUS_SHORTNAME` 填了 Disqus 的網站代號，網站上方才會出現「留言板」分頁，網址是 `/guestbook/`。留空就不顯示。
+- **管理留言：** 登入 disqus.com，進入網站的管理後台（Moderation），可以刪除留言或封鎖留言者。
+- **建議的 Disqus 設定：** 在 Settings → Advanced → Trusted Domains 填 `notes.abee-lin-tw.workers.dev`，避免別人把你的留言板嵌到他們的網站。
+
+## 搜尋引擎
+
+- **首頁和留言板：** 允許搜尋引擎收錄。
+- **編輯頁 `/admin/`：** 有 `noindex`，不會被收錄。
+
 ## 設定在哪裡
 
 | 設定 | 位置 |
