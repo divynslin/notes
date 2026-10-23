@@ -29,7 +29,7 @@ SRC = ROOT / "_src" / "動態"  # 動態原稿
 OUT = ROOT / "public"  # 產生的網站（不進 git；wrangler.jsonc 的 assets.directory）
 TITLE = "AI操作員"  # 網站名稱
 SITE_URL = "https://notes.abee-lin-tw.workers.dev"  # 網站的正式網址（留言板用來對應留言串）
-DISQUS_SHORTNAME = ""  # Disqus 網站代號（disqus.com 註冊時取的）；空的就不顯示留言板
+DISQUS_SHORTNAME = "ai-operator"  # Disqus 網站代號（disqus.com 註冊時取的）；空的就不顯示留言板
 
 STYLE = """<style>
   :root { --bg:#fafaf9; --fg:#1c1917; --muted:#78716c; --line:#e7e5e4; --code:#f5f5f4; --accent:#b91c1c; --hl:#fef3c7; }
