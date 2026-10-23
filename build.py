@@ -75,6 +75,9 @@ STYLE = """<style>
   .foot { margin-top:6px; font-size:.85rem; }
   .foot a { color:var(--muted); text-decoration:none; }
   .foot a:hover { color:var(--accent); text-decoration:underline; }
+  .cmt-toggle::after { content:" ▾"; }
+  .cmt-toggle.open::after { content:" ▴"; }
+  .entry > #disqus_thread { margin-top:12px; }
   .back { margin:20px 0 4px; font-size:.9rem; }
   .back a { color:var(--accent); text-decoration:none; }
   .cmt-h { font-size:1rem; margin:36px 0 8px; }
@@ -116,7 +119,7 @@ function filter() {
 q.addEventListener("input", filter);
 filter();
 </script>
-__COUNT_JS__
+__COMMENTS_JS__
 </body>
 </html>
 """
@@ -152,6 +155,47 @@ var disqus_config = function () {
   (document.head || document.body).appendChild(s);
 })();
 </script>"""
+
+# 動態牆上展開留言：點「留言」就把唯一的 Disqus 留言串搬到那則下面、換成那則的留言
+# （一個網頁只能有一個 Disqus，所以同時只展開一則；用新分頁打開連結則照常到單則頁面）
+INLINE_COMMENTS_JS = """<script>
+let thread, openLink;
+document.addEventListener("click", ev => {
+  const a = ev.target.closest("a.cmt-toggle");
+  if (!a || ev.button || ev.ctrlKey || ev.metaKey || ev.shiftKey) return;
+  ev.preventDefault();
+  if (a === openLink) {  // 再點一次：收起或重新展開
+    thread.hidden = !thread.hidden;
+    a.classList.toggle("open", !thread.hidden);
+    return;
+  }
+  if (!thread) {
+    thread = document.createElement("div");
+    thread.id = "disqus_thread";
+  }
+  if (openLink) openLink.classList.remove("open");
+  openLink = a;
+  a.classList.add("open");
+  thread.hidden = false;
+  a.closest(".entry").append(thread);
+  const config = function () {
+    this.page.url = a.dataset.url;
+    this.page.identifier = a.dataset.disqusIdentifier;
+    this.page.title = a.dataset.title;
+    this.language = "zh_TW";
+  };
+  if (window.DISQUS) {
+    DISQUS.reset({reload: true, config: config});
+  } else {
+    window.disqus_config = config;
+    const s = document.createElement("script");
+    s.src = "https://__SHORTNAME__.disqus.com/embed.js";
+    s.setAttribute("data-timestamp", +new Date());
+    document.head.appendChild(s);
+  }
+});
+</script>
+<script id="dsq-count-scr" src="https://__SHORTNAME__.disqus.com/count.js" async></script>"""
 
 # 單則動態 public/post/<id>/index.html：全文 + 這則的留言（設定 DISQUS_SHORTNAME 才會產生）
 POST_TEMPLATE = """<!DOCTYPE html>
@@ -449,6 +493,9 @@ def build():
             "html": markdown.markdown(e["body"], extensions=["extra", "sane_lists", "nl2br"]),
         })
     entries.sort(key=lambda e: e["t"], reverse=True)
+    for e in entries:
+        e["text"] = " ".join(html.unescape(re.sub(r"<[^>]+>", " ", e["html"])).split())
+        e["short"] = e["text"][:30] + ("…" if len(e["text"]) > 30 else "")
 
     def article(e, when, foot=""):
         return (f'<article class="entry" id="{e["id"]}"><div class="when">{when}'
@@ -458,23 +505,23 @@ def build():
         # Disqus 的 count.js 會把連結文字換成留言數（文字在 Disqus 後台 Community → Comment Count Link 設定）
         if not DISQUS_SHORTNAME:
             return ""
-        return (f'<div class="foot"><a href="post/{e["id"]}/index.html#disqus_thread" '
-                f'data-disqus-identifier="entry-{e["id"]}">留言</a></div>')
+        return (f'<div class="foot"><a class="cmt-toggle" href="post/{e["id"]}/index.html#disqus_thread" '
+                f'data-disqus-identifier="entry-{e["id"]}" data-url="{SITE_URL}/post/{e["id"]}/" '
+                f'data-title="{html.escape(e["short"])} · {html.escape(TITLE)}">留言</a></div>')
 
     months = []
     for ym, group in groupby(entries, key=lambda e: e["t"][:7]):
         y, m = ym.split("-")
         items = "".join(article(e, f'<a href="#{e["id"]}">{e["label"]}</a>', comments_link(e)) for e in group)
         months.append(f'<section class="month"><h2>{y} 年 {int(m)} 月</h2>\n{items}</section>')
-    count_js = (f'<script id="dsq-count-scr" src="https://{DISQUS_SHORTNAME}.disqus.com/count.js" async></script>'
-                if DISQUS_SHORTNAME else "")
+    comments_js = INLINE_COMMENTS_JS.replace("__SHORTNAME__", DISQUS_SHORTNAME) if DISQUS_SHORTNAME else ""
     page = (
         PAGE_TEMPLATE.replace("__STYLE__", STYLE)
         .replace("__HEADING__", html.escape(TITLE))
         .replace("__TABS__", tabs("動態", "", len(entries)))
         .replace("__ENTRIES__", "\n".join(months))
         .replace("__AGO_JS__", AGO_JS)
-        .replace("__COUNT_JS__", count_js)
+        .replace("__COMMENTS_JS__", comments_js)
     )
     (OUT / "admin").mkdir(parents=True, exist_ok=True)
     (OUT / "index.html").write_text(page, "utf-8")
@@ -489,8 +536,7 @@ def build():
     guestbook = OUT / "guestbook" / "index.html"
     if DISQUS_SHORTNAME:
         for e in entries:
-            text = " ".join(html.unescape(re.sub(r"<[^>]+>", " ", e["html"])).split())
-            short = text[:30] + ("…" if len(text) > 30 else "")
+            text, short = e["text"], e["short"]
             post = OUT / "post" / e["id"] / "index.html"
             post.parent.mkdir(parents=True, exist_ok=True)
             post.write_text(
