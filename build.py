@@ -280,6 +280,16 @@ ADMIN_TEMPLATE = r"""<!DOCTYPE html>
   .edit-form button { font:inherit; font-size:.9rem; padding:3px 16px; border-radius:6px; cursor:pointer;
                       border:1px solid var(--accent); background:var(--accent); color:var(--on-accent); }
   .edit-form button.cancel { background:transparent; color:var(--fg); border-color:var(--line); }
+  .edit-form .box textarea { display:block; border-radius:0 0 8px 8px; }
+  .toolbar { display:flex; flex-wrap:wrap; gap:2px; padding:3px 4px; border:1px solid var(--line); border-bottom:0;
+             border-radius:8px 8px 0 0; }
+  .edit-form .toolbar button { width:32px; height:30px; padding:0; display:grid; place-items:center; border:0;
+                               border-radius:6px; background:none; color:var(--muted); }
+  .edit-form .toolbar button:hover { background:var(--code); color:var(--fg); }
+  .edit-form .toolbar button[aria-pressed="true"] { color:var(--accent); }
+  .toolbar .end { margin-left:auto; }
+  .toolbar .sep { width:1px; margin:6px 4px; background:var(--line); }
+  .toolbar svg { width:18px; height:18px; fill:none; stroke:currentColor; stroke-width:2; stroke-linecap:round; stroke-linejoin:round; }
   button:disabled { opacity:.5; cursor:wait; }
   .month h2 { font-size:.85rem; font-weight:600; color:var(--muted); margin:28px 0 0; }
   .entry { position:relative; margin-left:5px; padding:12px 8px 14px 22px; border-left:2px solid var(--line); }
@@ -343,11 +353,109 @@ async function api(action, data) {
   return j;
 }
 
+// ---- 工具列：在游標位置或選取的文字套上 Markdown 語法 ----
+const ICONS = {
+  bold: '<path d="M14 12a4 4 0 0 0 0-8H6v8"/><path d="M15 20a4 4 0 0 0 0-8H6v8Z"/>',
+  italic: '<line x1="19" y1="4" x2="10" y2="4"/><line x1="14" y1="20" x2="5" y2="20"/><line x1="15" y1="4" x2="9" y2="20"/>',
+  strike: '<path d="M16 4H9a3 3 0 0 0-2.83 4"/><path d="M14 12a4 4 0 0 1 0 8H6"/><line x1="4" y1="12" x2="20" y2="12"/>',
+  heading: '<path d="M6 12h12"/><path d="M6 20V4"/><path d="M18 20V4"/>',
+  quote: '<path d="M10 7H6a2 2 0 0 0-2 2v3a2 2 0 0 0 2 2h3v1a3 3 0 0 1-3 3"/><path d="M20 7h-4a2 2 0 0 0-2 2v3a2 2 0 0 0 2 2h3v1a3 3 0 0 1-3 3"/>',
+  ul: '<line x1="9" y1="6" x2="21" y2="6"/><line x1="9" y1="12" x2="21" y2="12"/><line x1="9" y1="18" x2="21" y2="18"/><circle cx="4" cy="6" r="1"/><circle cx="4" cy="12" r="1"/><circle cx="4" cy="18" r="1"/>',
+  ol: '<line x1="10" y1="6" x2="21" y2="6"/><line x1="10" y1="12" x2="21" y2="12"/><line x1="10" y1="18" x2="21" y2="18"/><path d="M4 6h1v4"/><path d="M4 10h2"/><path d="M6 18H4c0-1 2-2 2-3s-1-1.5-2-1"/>',
+  link: '<path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>',
+  code: '<polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/>',
+  codeblock: '<rect x="3" y="3" width="18" height="18" rx="2"/><path d="m10 9-3 3 3 3"/><path d="m14 15 3-3-3-3"/>',
+  hr: '<line x1="4" y1="12" x2="20" y2="12"/>',
+  preview: '<path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/>',
+};
+const TOOLS = [["bold", "粗體（Ctrl+B）"], ["italic", "斜體（Ctrl+I）"], ["strike", "刪除線"], "|",
+               ["heading", "小標題"], ["quote", "引用"], ["ul", "項目清單"], ["ol", "編號清單"], "|",
+               ["link", "連結（Ctrl+K）"], ["code", "行內程式碼"], ["codeblock", "程式碼區塊"], ["hr", "分隔線"]];
+const icon = k => `<svg viewBox="0 0 24 24" aria-hidden="true">${ICONS[k]}</svg>`;
+const TOOLBAR = TOOLS.map(t => t === "|" ? '<span class="sep"></span>'
+                          : `<button type="button" data-k="${t[0]}" title="${t[1]}" aria-label="${t[1]}">${icon(t[0])}</button>`).join("")
+  + `<button type="button" class="end" data-k="preview" title="顯示／隱藏預覽" aria-label="顯示／隱藏預覽">${icon("preview")}</button>`;
+let showPreview = true;
+try { showPreview = localStorage.getItem("notes-preview") !== "off"; } catch {}
+
+// 把 [start, end) 換成 text，再選取 [from, to)；用 insertText 才能用 Ctrl+Z 復原
+function put(ta, start, end, text, from, to) {
+  ta.focus();
+  ta.setSelectionRange(start, end);
+  if (!text || !document.execCommand("insertText", false, text)) ta.setRangeText(text, start, end);
+  ta.setSelectionRange(from, to);
+}
+// 網站用的 Python-Markdown 要求清單、分隔線、程式碼區塊前面空一行，不然不會排版
+function blankBefore(v, i) {
+  if (i === 0 || v.slice(i - 2, i) === "\n\n") return "";
+  return v[i - 1] === "\n" ? (i === 1 ? "" : "\n") : "\n\n";
+}
+function blankAfter(v, i) {
+  if (i === v.length || v.slice(i, i + 2) === "\n\n") return "";
+  return v[i] === "\n" ? "\n" : "\n\n";
+}
+// 前後加上記號（已經有就拿掉）
+function wrap(ta, before, after, placeholder) {
+  const v = ta.value, s = ta.selectionStart, e = ta.selectionEnd;
+  if (s >= before.length && v.slice(s - before.length, s) === before && v.slice(e, e + after.length) === after) {
+    const inner = v.slice(s, e);
+    return put(ta, s - before.length, e + after.length, inner, s - before.length, s - before.length + inner.length);
+  }
+  const inner = v.slice(s, e) || placeholder;
+  put(ta, s, e, before + inner + after, s + before.length, s + before.length + inner.length);
+}
+// 選到的每一行開頭加上記號（每行都已經有就拿掉）
+const ANY_LIST = /^\s*([-*+]|\d+\.)\s+/;
+function lines(ta, prefix, re, list) {
+  const v = ta.value, collapsed = ta.selectionStart === ta.selectionEnd;
+  const s = v.lastIndexOf("\n", ta.selectionStart - 1) + 1;
+  let e = !collapsed && v[ta.selectionEnd - 1] === "\n" ? ta.selectionEnd - 1 : ta.selectionEnd;
+  e = v.indexOf("\n", e);
+  if (e < 0) e = v.length;
+  const ls = v.slice(s, e).split("\n"), filled = ls.filter(l => l.trim());
+  const off = filled.length > 0 && filled.every(l => re.test(l));
+  let n = 0;
+  const out = ls.map(l => off ? l.replace(re, "")
+    : l.trim() || ls.length === 1 ? prefix(n++) + l.replace(list ? ANY_LIST : re, "") : l).join("\n");
+  const prev = v.slice(v.lastIndexOf("\n", s - 2) + 1, Math.max(s - 1, 0));
+  const lead = list && !off && !ANY_LIST.test(prev) ? blankBefore(v, s) : "";
+  const end = s + lead.length + out.length;
+  put(ta, s, e, lead + out, collapsed ? end : s + lead.length, end);
+}
+function link(ta) {
+  const v = ta.value, s = ta.selectionStart, e = ta.selectionEnd, sel = v.slice(s, e);
+  if (/^https?:\/\/\S+$/.test(sel)) return put(ta, s, e, `[連結文字](${sel})`, s + 1, s + 5);  // 選的是網址：選取「連結文字」
+  const text = sel || "連結文字";
+  put(ta, s, e, `[${text}](https://)`, s + text.length + 3, s + text.length + 11);  // 選取網址的位置
+}
+function block(ta, before, after, placeholder) {
+  const v = ta.value, s = ta.selectionStart, e = ta.selectionEnd, inner = v.slice(s, e) || placeholder;
+  const lead = blankBefore(v, s), tail = e === v.length ? "\n\n" : blankAfter(v, e);
+  const text = lead + before + inner + after + tail;
+  const from = s + lead.length + before.length;
+  if (placeholder && inner === placeholder) put(ta, s, e, text, from, from + inner.length);
+  else put(ta, s, e, text, s + text.length, s + text.length);
+}
+const ACTIONS = {
+  bold: ta => wrap(ta, "**", "**", "粗體文字"),
+  italic: ta => wrap(ta, "*", "*", "斜體文字"),
+  strike: ta => wrap(ta, "<del>", "</del>", "刪除的文字"),
+  heading: ta => lines(ta, () => "### ", /^#{1,6}\s+/),
+  quote: ta => lines(ta, () => "> ", /^>\s?/),
+  ul: ta => lines(ta, () => "- ", /^\s*[-*+]\s+/, true),
+  ol: ta => lines(ta, i => `${i + 1}. `, /^\s*\d+\.\s+/, true),
+  link,
+  code: ta => wrap(ta, "`", "`", "程式碼"),
+  codeblock: ta => block(ta, "```\n", "\n```", "程式碼"),
+  hr: ta => { ta.setSelectionRange(ta.selectionEnd, ta.selectionEnd); block(ta, "---", "", ""); },
+};
+
 // 新增和修改共用的表單；e 是要修改的那則（新增時是 null）
 function editor(e, onCancel) {
   const f = document.createElement("form");
   f.className = "edit-form";
-  f.innerHTML = `<textarea placeholder="想說什麼？可以用 Markdown：**粗體**、[連結](網址)、> 引用"></textarea>
+  f.innerHTML = `<div class="box"><div class="toolbar" role="toolbar">${TOOLBAR}</div>
+    <textarea placeholder="想說什麼？可以用上面的按鈕，或直接打 Markdown：**粗體**、[連結](網址)、> 引用"></textarea></div>
     <div class="row"><input type="date" required><input type="time" title="不填就只顯示日期"><span class="sp"></span>
     ${onCancel ? '<button type="button" class="cancel">取消</button>' : ""}<button>${e ? "儲存" : "發佈"}</button></div>
     <div class="preview body" hidden></div>`;
@@ -355,8 +463,24 @@ function editor(e, onCancel) {
   const pv = f.querySelector(".preview");
   const update = () => {  // 邊打字邊預覽；輸入框跟著內容長高
     ta.rows = Math.max(3, ta.value.split("\n").length + 1);
-    pv.hidden = !ta.value.trim();
+    pv.hidden = !showPreview || !ta.value.trim();
     if (!pv.hidden) pv.innerHTML = md(ta.value);
+    f.querySelector('[data-k="preview"]').setAttribute("aria-pressed", showPreview);
+  };
+  f.update = update;
+  const bar = f.querySelector(".toolbar");
+  bar.onmousedown = ev => ev.preventDefault();  // 按工具列時不讓輸入框失去焦點（手機上鍵盤也不會收起）
+  bar.onclick = ev => {
+    const b = ev.target.closest("button[data-k]");
+    if (!b) return;
+    if (b.dataset.k === "preview") {
+      showPreview = !showPreview;
+      try { localStorage.setItem("notes-preview", showPreview ? "on" : "off"); } catch {}
+      document.querySelectorAll(".edit-form").forEach(form => form.update());
+      return;
+    }
+    ACTIONS[b.dataset.k](ta);
+    update();
   };
   const setNow = () => {
     const d = new Date();
@@ -368,7 +492,15 @@ function editor(e, onCancel) {
   update();
   ta.addEventListener("input", update);
   day.oninput = time.oninput = () => touched = true;
-  ta.onkeydown = ev => { if (ev.key === "Enter" && (ev.ctrlKey || ev.metaKey)) f.requestSubmit(); };
+  ta.onkeydown = ev => {
+    if (!(ev.ctrlKey || ev.metaKey) || ev.altKey) return;
+    const k = ev.key === "Enter" ? "submit" : {b: "bold", i: "italic", k: "link"}[ev.key.toLowerCase()];
+    if (!k) return;
+    ev.preventDefault();
+    if (k === "submit") return f.requestSubmit();
+    ACTIONS[k](ta);
+    update();
+  };
   f.onsubmit = async ev => {
     ev.preventDefault();
     if (!ta.value.trim()) return ta.focus();
