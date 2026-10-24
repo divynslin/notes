@@ -8,9 +8,15 @@
 原稿 _src/動態/<年>.md：每則以「## 2026-10-11」或「## 2026-10-11 21:30」開頭，到下一個同樣格式的標題為止，
 內文是一般 Markdown；檔案裡的先後順序不重要，網頁上新的排前面。
 
+編輯頁上傳的圖片存在 _src/img/<年>/，產生網站時複製到 public/img/，內文用 ![](/img/<年>/<檔名>) 引用。
+
 線上編輯頁 /admin/ 呼叫 worker.js（Cloudflare Worker），透過 GitHub API 改原稿（設定方式見 README.md）。
-解析與改寫原稿的規則在那支 JS 裡也有一份，改這裡的 ENTRY_RE / load_entries / save_entry / delete_entry 時要一起改。
+解析與改寫原稿的規則在那支 JS 裡也有一份，改這裡的 ENTRY_RE / load_entries / save_entry / delete_entry / save_image
+時要一起改。
 """
+import base64
+import binascii
+import email.utils
 import hashlib
 import html
 import json
@@ -20,17 +26,22 @@ import sys
 import threading
 import urllib.parse
 import webbrowser
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from itertools import groupby
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 SRC = ROOT / "_src" / "動態"  # 動態原稿
+IMG = ROOT / "_src" / "img"  # 編輯頁上傳的圖片
 OUT = ROOT / "public"  # 產生的網站（不進 git；wrangler.jsonc 的 assets.directory）
 TITLE = "AI操作員"  # 網站名稱
-SITE_URL = "https://notes.abee-lin-tw.workers.dev"  # 網站的正式網址（留言板用來對應留言串）
+SITE_URL = "https://notes.abee-lin-tw.workers.dev"  # 網站的正式網址（留言板用來對應留言串，RSS 的連結也用這個）
 DISQUS_SHORTNAME = "ai-operator"  # Disqus 網站代號（disqus.com 註冊時取的）；空的就不顯示留言板和每則的留言
+CF_ANALYTICS_TOKEN = ""  # Cloudflare Web Analytics 的 token；空的就不加統計碼（編輯頁一律不加）
+FEED_SIZE = 30  # RSS 放最新的幾則
+MAX_IMAGE = 10 * 1024 * 1024  # 上傳圖片的大小上限（worker.js 也有一份）
+TZ = timezone(timedelta(hours=8))  # 台灣時間：RSS 的發文時間、圖片放哪一年的資料夾
 
 STYLE = """<style>
   :root { --bg:#fafaf9; --fg:#1c1917; --muted:#78716c; --line:#e7e5e4; --code:#f5f5f4; --accent:#b91c1c; --hl:#fef3c7; }
@@ -51,6 +62,7 @@ STYLE = """<style>
   .tab:hover { color:var(--fg); }
   .tab[aria-current] { color:var(--accent); font-weight:600; border-bottom-color:var(--accent); }
   .tab .n { font-size:.8rem; font-weight:normal; margin-left:4px; opacity:.8; }
+  .tab.rss { margin-left:auto; font-size:.85rem; }
   main { max-width:760px; margin:0 auto; padding:0 24px 30vh; }
   .month h2 { font-size:.85rem; font-weight:600; color:var(--muted); margin:28px 0 0; }
   .entry { position:relative; margin-left:5px; padding:12px 8px 14px 22px; border-left:2px solid var(--line);
@@ -91,6 +103,7 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>__HEADING__</title>
+__META__
 __STYLE__
 </head>
 <body>
@@ -205,6 +218,7 @@ POST_TEMPLATE = """<!DOCTYPE html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>__PTITLE__ · __HEADING__</title>
 <meta name="description" content="__DESC__">
+__META__
 __STYLE__
 </head>
 <body>
@@ -231,6 +245,7 @@ GUESTBOOK_TEMPLATE = """<!DOCTYPE html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>留言板 · __HEADING__</title>
+__META__
 __STYLE__
 </head>
 <body>
@@ -244,6 +259,20 @@ __DISQUS__
 </main>
 </body>
 </html>
+"""
+
+# RSS 訂閱 public/feed.xml：最新的 FEED_SIZE 則全文，網址都要寫完整
+FEED_TEMPLATE = """<?xml version="1.0" encoding="utf-8"?>
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom">
+<channel>
+<title>__HEADING__</title>
+<link>__SITE__/</link>
+<atom:link href="__SITE__/feed.xml" rel="self" type="application/rss+xml"/>
+<description>__HEADING__的動態</description>
+<language>zh-TW</language>
+__ITEMS__
+</channel>
+</rss>
 """
 
 # 編輯頁 public/admin/index.html：本機（--edit）和線上（Cloudflare Access 保護）共用，
@@ -330,8 +359,10 @@ const $ = id => document.getElementById(id);
 const pad = n => String(n).padStart(2, "0");
 const esc = s => String(s).replace(/[&<>"]/g, c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;"}[c]));
 let mode = "", msgTimer;
+const uploaded = {};  // 剛上傳的圖片網址 → 本機的預覽（線上要等網站更新後，那個網址才有圖）
 // Markdown 排版（和網站一樣，單一換行也會換行）。網站實際是用 Python-Markdown 產生，少數寫法可能略有不同
-const md = t => window.marked ? marked.parse(t, {breaks: true}) : esc(t).replace(/\n/g, "<br>");
+const md = t => (window.marked ? marked.parse(t, {breaks: true}) : esc(t).replace(/\n/g, "<br>"))
+  .replace(/src="(\/img\/[^"]+)"/g, (m, u) => uploaded[u] ? `src="${uploaded[u]}"` : m);
 
 function say(text) {
   $("msg").textContent = text;
@@ -363,6 +394,7 @@ const ICONS = {
   ul: '<line x1="9" y1="6" x2="21" y2="6"/><line x1="9" y1="12" x2="21" y2="12"/><line x1="9" y1="18" x2="21" y2="18"/><circle cx="4" cy="6" r="1"/><circle cx="4" cy="12" r="1"/><circle cx="4" cy="18" r="1"/>',
   ol: '<line x1="10" y1="6" x2="21" y2="6"/><line x1="10" y1="12" x2="21" y2="12"/><line x1="10" y1="18" x2="21" y2="18"/><path d="M4 6h1v4"/><path d="M4 10h2"/><path d="M6 18H4c0-1 2-2 2-3s-1-1.5-2-1"/>',
   link: '<path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>',
+  image: '<rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-3.09-3.09a2 2 0 0 0-2.82 0L6 21"/>',
   code: '<polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/>',
   codeblock: '<rect x="3" y="3" width="18" height="18" rx="2"/><path d="m10 9-3 3 3 3"/><path d="m14 15 3-3-3-3"/>',
   hr: '<line x1="4" y1="12" x2="20" y2="12"/>',
@@ -370,7 +402,8 @@ const ICONS = {
 };
 const TOOLS = [["bold", "粗體（Ctrl+B）"], ["italic", "斜體（Ctrl+I）"], ["strike", "刪除線"], "|",
                ["heading", "小標題"], ["quote", "引用"], ["ul", "項目清單"], ["ol", "編號清單"], "|",
-               ["link", "連結（Ctrl+K）"], ["code", "行內程式碼"], ["codeblock", "程式碼區塊"], ["hr", "分隔線"]];
+               ["link", "連結（Ctrl+K）"], ["image", "圖片（也可以直接貼上，或拖進輸入框）"],
+               ["code", "行內程式碼"], ["codeblock", "程式碼區塊"], ["hr", "分隔線"]];
 const icon = k => `<svg viewBox="0 0 24 24" aria-hidden="true">${ICONS[k]}</svg>`;
 const TOOLBAR = TOOLS.map(t => t === "|" ? '<span class="sep"></span>'
                           : `<button type="button" data-k="${t[0]}" title="${t[1]}" aria-label="${t[1]}">${icon(t[0])}</button>`).join("")
@@ -450,6 +483,43 @@ const ACTIONS = {
   hr: ta => { ta.setSelectionRange(ta.selectionEnd, ta.selectionEnd); block(ta, "---", "", ""); },
 };
 
+// ---- 圖片：先在瀏覽器縮小、轉成 WebP 再上傳（重新轉檔也會去掉相片裡的拍攝地點等資料） ----
+const MAX_W = 1600, MAX_H = 3200;  // 手機的長截圖維持原本的寬度
+const MAX_IMAGE = 10 * 1024 * 1024;  // 和伺服器的上限相同
+const images = list => [...list].filter(f => f.type.startsWith("image/"));
+async function shrink(file) {
+  if (file.type === "image/gif") return file;  // GIF 可能是動圖，轉檔會變成靜止的，所以照原檔上傳
+  const img = new Image(), src = URL.createObjectURL(file);
+  try {
+    img.src = src;
+    await img.decode().catch(() => { throw new Error("看不懂這個圖片格式"); });
+    const k = Math.min(1, MAX_W / img.naturalWidth, MAX_H / img.naturalHeight);
+    const c = document.createElement("canvas");
+    c.width = Math.max(1, Math.round(img.naturalWidth * k));
+    c.height = Math.max(1, Math.round(img.naturalHeight * k));
+    const g = c.getContext("2d");
+    g.fillStyle = "#fff";  // 透明的地方填白色
+    g.fillRect(0, 0, c.width, c.height);
+    g.imageSmoothingQuality = "high";
+    g.drawImage(img, 0, 0, c.width, c.height);
+    const encode = type => new Promise(ok => c.toBlob(ok, type, 0.85));
+    const out = await encode("image/webp");
+    return out && out.type === "image/webp" ? out : await encode("image/jpeg");  // Safari 不能存成 WebP，改存 JPG
+  } finally {
+    URL.revokeObjectURL(src);
+  }
+}
+const base64 = blob => new Promise((ok, no) => {
+  const r = new FileReader();
+  r.onload = () => ok(r.result.slice(r.result.indexOf(",") + 1));
+  r.onerror = () => no(r.error);
+  r.readAsDataURL(blob);
+});
+// 圖片沒放進輸入框時，不要讓瀏覽器直接打開它（會離開這頁，打到一半的字就不見了）
+["dragover", "drop"].forEach(t => document.addEventListener(t, ev => {
+  if (ev.dataTransfer.types.includes("Files")) ev.preventDefault();
+}));
+
 // 新增和修改共用的表單；e 是要修改的那則（新增時是 null）
 function editor(e, onCancel) {
   const f = document.createElement("form");
@@ -458,9 +528,9 @@ function editor(e, onCancel) {
     <textarea placeholder="想說什麼？可以用上面的按鈕，或直接打 Markdown：**粗體**、[連結](網址)、> 引用"></textarea></div>
     <div class="row"><input type="date" required><input type="time" title="不填就只顯示日期"><span class="sp"></span>
     ${onCancel ? '<button type="button" class="cancel">取消</button>' : ""}<button>${e ? "儲存" : "發佈"}</button></div>
-    <div class="preview body" hidden></div>`;
-  const [ta, day, time] = f.querySelectorAll("textarea, input");
-  const pv = f.querySelector(".preview");
+    <div class="preview body" hidden></div><input type="file" accept="image/*" multiple hidden>`;
+  const [ta, day, time, pick] = f.querySelectorAll("textarea, input");
+  const pv = f.querySelector(".preview"), submit = f.querySelector(".row button:not(.cancel)");
   const update = () => {  // 邊打字邊預覽；輸入框跟著內容長高
     ta.rows = Math.max(3, ta.value.split("\n").length + 1);
     pv.hidden = !showPreview || !ta.value.trim();
@@ -479,9 +549,48 @@ function editor(e, onCancel) {
       document.querySelectorAll(".edit-form").forEach(form => form.update());
       return;
     }
+    if (b.dataset.k === "image") return pick.click();
     ACTIONS[b.dataset.k](ta);
     update();
   };
+  // 一張一張上傳，在游標的位置插入 ![](/img/…)；上傳完之前不能送出，免得發出去的動態少了圖
+  let uploading = 0;
+  const addImages = async files => {
+    if (!files.length) return say("只能放圖片。");
+    uploading++;
+    submit.disabled = true;
+    try {
+      for (const [i, file] of files.entries()) {
+        say("圖片上傳中…" + (files.length > 1 ? `（${i + 1}/${files.length}）` : ""));
+        const blob = await shrink(file);
+        if (blob.size > MAX_IMAGE) throw new Error(`圖片太大，上限 ${MAX_IMAGE / 1024 / 1024} MB`);
+        const {url} = await api("upload", {data: await base64(blob)});
+        uploaded[url] = uploaded[url] || URL.createObjectURL(blob);
+        ta.setSelectionRange(ta.selectionEnd, ta.selectionEnd);
+        block(ta, `![](${url})`, "", "");
+        update();
+      }
+      say(`圖片已上傳，按「${e ? "儲存" : "發佈"}」後才會出現在網站上。`);
+    } catch (err) {
+      say("");
+      alert("圖片上傳失敗：" + err.message);
+    } finally {
+      if (!--uploading) submit.disabled = false;
+    }
+  };
+  pick.onchange = () => { addImages(images(pick.files)); pick.value = ""; };
+  // 貼上截圖或「複製圖片」就上傳；從 Word、Excel 複製的內容同時也有文字，那就照常貼上文字
+  ta.addEventListener("paste", ev => {
+    const files = images(ev.clipboardData.files);
+    if (!files.length || ev.clipboardData.getData("text/plain")) return;
+    ev.preventDefault();
+    addImages(files);
+  });
+  ta.addEventListener("drop", ev => {
+    if (!ev.dataTransfer.files.length) return;
+    ev.preventDefault();
+    addImages(images(ev.dataTransfer.files));
+  });
   const setNow = () => {
     const d = new Date();
     day.value = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
@@ -503,6 +612,7 @@ function editor(e, onCancel) {
   };
   f.onsubmit = async ev => {
     ev.preventDefault();
+    if (uploading) return say("圖片還在上傳，請稍等。");
     if (!ta.value.trim()) return ta.focus();
     if (!touched) setNow();
     const buttons = f.querySelectorAll("button");
@@ -625,11 +735,26 @@ def tabs(current, prefix, count):
     return "".join(
         f'<a class="tab" href="{prefix}{href}"' + (' aria-current="page"' if name == current else "") + f'>{name}{extra}</a>'
         for name, href, extra in items
-    )
+    ) + f'<a class="tab rss" href="{prefix}feed.xml" title="用 RSS 閱讀器訂閱">RSS</a>'
+
+
+def head_meta(prefix):
+    """公開頁面的 <head> 要多加的：RSS 的位置（讓 RSS 閱讀器自動找到），和 Cloudflare Web Analytics 的統計碼。"""
+    meta = f'<link rel="alternate" type="application/rss+xml" title="{html.escape(TITLE)}" href="{prefix}feed.xml">'
+    if CF_ANALYTICS_TOKEN:
+        meta += ('\n<script defer src="https://static.cloudflareinsights.com/beacon.min.js" '
+                 f"data-cf-beacon='{json.dumps({'token': CF_ANALYTICS_TOKEN})}'></script>")
+    return meta
+
+
+def img_urls(h, prefix):
+    """內文裡的圖片網址 /img/… 換成以 prefix 開頭（相對路徑讓 file:// 也看得到圖；RSS 要完整網址）。"""
+    return re.sub(r'(src|href)="/img/', lambda m: f'{m[1]}="{prefix}img/', h)
 
 
 def build():
-    """產生 public/index.html（動態牆，新的排前面）、public/admin/index.html（編輯頁），
+    """產生 public/index.html（動態牆，新的排前面）、public/feed.xml（RSS）、public/img/（圖片）、
+    public/admin/index.html（編輯頁），
     有設定 Disqus 時再加上 public/post/<id>/index.html（每則動態的留言）與 public/guestbook/index.html（留言板）。
     每則留言串的 identifier 是「entry-<動態 id>」，動態 id 由日期時間組成，所以改了動態的日期時間，舊留言就對不上了。"""
     import markdown
@@ -643,16 +768,18 @@ def build():
             "id": e["id"],
             "t": e["date"] + (f"T{e['time']}" if e["time"] else ""),
             "label": f"{int(m)}/{int(d)}" + (f" {e['time']}" if e["time"] else ""),
-            "html": markdown.markdown(e["body"], extensions=["extra", "sane_lists", "nl2br"]),
+            "html": markdown.markdown(e["body"], extensions=["extra", "sane_lists", "nl2br"])
+                    .replace("<img ", '<img loading="lazy" '),  # 捲到附近才載入圖片
         })
     entries.sort(key=lambda e: e["t"], reverse=True)
     for e in entries:
         e["text"] = " ".join(html.unescape(re.sub(r"<[^>]+>", " ", e["html"])).split())
-        e["short"] = e["text"][:30] + ("…" if len(e["text"]) > 30 else "")
+        e["short"] = (e["text"][:30] + ("…" if len(e["text"]) > 30 else "")) or "（圖片）"
 
-    def article(e, when, foot=""):
+    def article(e, when, foot="", prefix=""):
         return (f'<article class="entry" id="{e["id"]}"><div class="when">{when}'
-                f'<span class="ago" data-t="{e["t"]}"></span></div>\n<div class="body">{e["html"]}</div>{foot}</article>\n')
+                f'<span class="ago" data-t="{e["t"]}"></span></div>\n'
+                f'<div class="body">{img_urls(e["html"], prefix)}</div>{foot}</article>\n')
 
     def comments_link(e):
         # Disqus 的 count.js 會把連結文字換成留言數（文字在 Disqus 後台 Community → Comment Count Link 設定）
@@ -670,6 +797,7 @@ def build():
     comments_js = INLINE_COMMENTS_JS.replace("__SHORTNAME__", DISQUS_SHORTNAME) if DISQUS_SHORTNAME else ""
     page = (
         PAGE_TEMPLATE.replace("__STYLE__", STYLE)
+        .replace("__META__", head_meta(""))
         .replace("__HEADING__", html.escape(TITLE))
         .replace("__TABS__", tabs("動態", "", len(entries)))
         .replace("__ENTRIES__", "\n".join(months))
@@ -678,6 +806,22 @@ def build():
     )
     (OUT / "admin").mkdir(parents=True, exist_ok=True)
     (OUT / "index.html").write_text(page, "utf-8")
+
+    items = []
+    for e in entries[:FEED_SIZE]:
+        url = f"{SITE_URL}/post/{e['id']}/" if DISQUS_SHORTNAME else f"{SITE_URL}/#{e['id']}"
+        when = email.utils.format_datetime(datetime.fromisoformat(e["t"]).replace(tzinfo=TZ))
+        items.append(f"<item>\n<title>{html.escape(e['short'])}</title>\n<link>{url}</link>\n"
+                     f'<guid isPermaLink="true">{url}</guid>\n<pubDate>{when}</pubDate>\n'
+                     f"<description>{html.escape(img_urls(e['html'], SITE_URL + '/'))}</description>\n</item>")
+    (OUT / "feed.xml").write_text(
+        FEED_TEMPLATE.replace("__HEADING__", html.escape(TITLE)).replace("__SITE__", SITE_URL)
+        .replace("__ITEMS__", "\n".join(items)), "utf-8")
+
+    # 圖片整個重新複製（_src/img/ 刪掉的圖，網站上也跟著消失）
+    shutil.rmtree(OUT / "img", ignore_errors=True)
+    if IMG.exists():
+        shutil.copytree(IMG, OUT / "img")
 
     def disqus(url, ident, title):
         js = lambda v: json.dumps(v, ensure_ascii=False).replace("</", "<\\/")
@@ -694,17 +838,19 @@ def build():
             post.parent.mkdir(parents=True, exist_ok=True)
             post.write_text(
                 POST_TEMPLATE.replace("__STYLE__", STYLE)
+                .replace("__META__", head_meta("../../"))
                 .replace("__HEADING__", html.escape(TITLE))
                 .replace("__TABS__", tabs("動態", "../../", len(entries)))
                 .replace("__PTITLE__", html.escape(short))
                 .replace("__DESC__", html.escape(text[:120]))
                 .replace("__ID__", e["id"])
-                .replace("__ENTRY__", article(e, e["label"]))
+                .replace("__ENTRY__", article(e, e["label"], prefix="../../"))
                 .replace("__DISQUS__", disqus(f"{SITE_URL}/post/{e['id']}/", f"entry-{e['id']}", f"{short} · {TITLE}"))
                 .replace("__AGO_JS__", AGO_JS), "utf-8")
         guestbook.parent.mkdir(exist_ok=True)
         guestbook.write_text(
             GUESTBOOK_TEMPLATE.replace("__STYLE__", STYLE)
+            .replace("__META__", head_meta("../"))
             .replace("__HEADING__", html.escape(TITLE))
             .replace("__TABS__", tabs("留言板", "../", len(entries)))
             .replace("__DISQUS__", disqus(f"{SITE_URL}/guestbook/", "guestbook", f"留言板 · {TITLE}")), "utf-8")
@@ -755,8 +901,34 @@ def delete_entry(eid, ver):
     e["file"].write_text(text[:start] + text[end:], "utf-8")
 
 
+def image_ext(data):
+    """看檔案開頭判斷圖片格式（不相信瀏覽器說的類型）；不是 JPG、PNG、GIF、WebP 就回傳空字串。"""
+    return ("jpg" if data[:3] == b"\xff\xd8\xff" else "png" if data[:4] == b"\x89PNG" else "gif" if data[:4] == b"GIF8"
+            else "webp" if data[:4] == b"RIFF" and data[8:12] == b"WEBP" else "")
+
+
+def save_image(data):
+    """存一張編輯頁上傳的圖片（base64），回傳內文用的網址 /img/<年>/<檔名>。
+    檔名取自圖片內容的 SHA-1，同一張圖傳兩次只會存一份。"""
+    try:
+        raw = base64.b64decode(str(data or ""), validate=True)
+    except binascii.Error:
+        raise ValueError("圖片資料不對") from None
+    if len(raw) > MAX_IMAGE:
+        raise ValueError(f"圖片太大，上限 {MAX_IMAGE // 1024 // 1024} MB")
+    ext = image_ext(raw)
+    if not ext:
+        raise ValueError("只能上傳 JPG、PNG、GIF、WebP 圖片")
+    name = f"{datetime.now(TZ).year}/{hashlib.sha1(raw).hexdigest()[:16]}.{ext}"
+    path = IMG / name
+    if not path.exists():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(raw)
+    return f"/img/{name}"
+
+
 class Editor(SimpleHTTPRequestHandler):
-    """--edit 的本機伺服器：提供 public/ 的檔案，/admin/api/ 處理讀取、新增、修改、刪除（和線上版的 API 相同）。"""
+    """--edit 的本機伺服器：提供 public/ 的檔案，/admin/api/ 處理讀取、新增、修改、刪除、上傳圖片（和線上版的 API 相同）。"""
     lock = threading.Lock()
 
     def __init__(self, *args, **kwargs):
@@ -789,19 +961,22 @@ class Editor(SimpleHTTPRequestHandler):
                 origin and urllib.parse.urlsplit(origin).netloc != self.headers.get("Host")):
             return self.send_json({"error": "拒絕"}, 403)
         action = urllib.parse.urlsplit(self.path).path.removeprefix("/admin/api/")
-        if action not in ("save", "delete"):
+        if action not in ("save", "delete", "upload"):
             return self.send_json({"error": "找不到"}, 404)
+        result = {"ok": True}
         try:
             data = json.loads(self.rfile.read(int(self.headers.get("Content-Length") or 0)) or b"{}")
             with self.lock:
                 if action == "save":
                     save_entry(data.get("id"), data.get("ver"), data.get("date"), data.get("time"), data.get("body"))
-                else:
+                elif action == "delete":
                     delete_entry(data.get("id"), data.get("ver"))
+                else:
+                    result["url"] = save_image(data.get("data"))
                 build()
         except ValueError as err:  # 也包含 JSON 格式錯誤
             return self.send_json({"error": str(err)}, 400)
-        self.send_json({"ok": True})
+        self.send_json(result)
 
 
 def edit(port: int = 8000):

@@ -2,8 +2,9 @@
 //   GET  /admin/api/entries   讀取所有動態
 //   POST /admin/api/save      新增或修改一則（{id, ver, date, time, body}，新增時 id 為空）
 //   POST /admin/api/delete    刪除一則（{id, ver}）
-// 透過 GitHub API 讀寫 _src/動態/*.md，每次存檔就是一個 commit，Workers Builds 會自動重新部署。
-// 解析與改寫原稿的規則和 build.py 的 ENTRY_RE / load_entries / save_entry / delete_entry 相同，要一起改。
+//   POST /admin/api/upload    上傳一張圖片（{data}，base64），回傳內文用的網址 {url}
+// 透過 GitHub API 讀寫 _src/動態/*.md、新增 _src/img/ 的圖片，每次存檔就是一個 commit，Workers Builds 會自動重新部署。
+// 解析與改寫原稿的規則和 build.py 的 ENTRY_RE / load_entries / save_entry / delete_entry / save_image 相同，要一起改。
 //
 // 設定：GITHUB_REPO、ACCESS_TEAM、ACCESS_AUD 寫在 wrangler.jsonc 的 vars；
 // GITHUB_TOKEN（只能讀寫這個 repo 內容的 fine-grained token）要在 Cloudflare 後台加成 Secret（見 README.md）。
@@ -11,6 +12,8 @@
 // 沒登入的人也改不了。
 
 const SRC = "_src/動態";
+const IMG = "_src/img";
+const MAX_IMAGE = 10 * 1024 * 1024;  // 上傳圖片的大小上限（build.py 也有一份）
 // 一則動態的開頭：「## 2026-10-11」或「## 2026-10-11 21:30」
 const ENTRY_RE = /^##[ \t]+(\d{4}-\d{2}-\d{2})(?:[ \tT]+(\d{1,2}:\d{2}))?[ \t]*$/gm;
 
@@ -33,10 +36,11 @@ export default {
         const entries = (await loadEntries(gh)).map(({id, date, time, body, ver}) => ({id, date, time, body, ver}));
         return json({mode: "online", entries});
       }
-      if (request.method === "POST" && (action === "save" || action === "delete")) {
+      if (request.method === "POST" && ["save", "delete", "upload"].includes(action)) {
         // 只接受編輯頁送來的 JSON（其他網站沒辦法跨站送這種請求）
         if (!(request.headers.get("Content-Type") || "").startsWith("application/json")) return json({error: "拒絕"}, 403);
         const data = await request.json().catch(() => { throw new UserError("資料格式不對"); });
+        if (action === "upload") return json({ok: true, url: await saveImage(gh, data)});
         if (action === "save") await saveEntry(gh, data);
         else await deleteEntry(gh, data);
         return json({ok: true});
@@ -86,8 +90,7 @@ async function accessEmail(request, env) {
 
 // ---- GitHub 讀寫 ----
 
-function toB64(text) {
-  const bytes = new TextEncoder().encode(text);
+function toB64(bytes) {
   let bin = "";
   for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
   return btoa(bin);
@@ -98,7 +101,7 @@ function github(env) {
   const branch = env.GITHUB_BRANCH || "main";
   const base = `https://api.github.com/repos/${env.GITHUB_REPO}/contents/`;
   const call = (path, {method = "GET", body, accept = "application/vnd.github+json"} = {}) =>
-    fetch(base + path.split("/").map(encodeURIComponent).join("/") + (method === "GET" ? `?ref=${encodeURIComponent(branch)}` : ""), {
+    fetch(base + path.split("/").map(encodeURIComponent).join("/") + (method !== "PUT" ? `?ref=${encodeURIComponent(branch)}` : ""), {
       method,
       body: body && JSON.stringify(body),
       headers: {
@@ -121,8 +124,15 @@ function github(env) {
       return (await r.text()).replace(/^﻿/, "").replace(/\r\n/g, "\n");
     },
     async write(path, text, sha, message) {
-      const r = await call(path, {method: "PUT", body: {message, content: toB64(text), branch, ...(sha ? {sha} : {})}});
+      const r = await call(path, {method: "PUT", body: {message, content: toB64(new TextEncoder().encode(text)), branch,
+                                                        ...(sha ? {sha} : {})}});
       if (r.status === 409 || r.status === 422) throw new UserError("檔案剛被改過，請重新整理頁面再試一次");
+      if (!r.ok) throw await fail(r);
+    },
+    // 新增檔案（內容是 base64）；已經有同名的檔案就不動（圖片的檔名來自內容，同名就是同一張圖）
+    async create(path, b64, message) {
+      if ((await call(path, {method: "HEAD"})).ok) return;
+      const r = await call(path, {method: "PUT", body: {message, content: b64, branch}});
       if (!r.ok) throw await fail(r);
     },
   };
@@ -193,4 +203,27 @@ async function deleteEntry(gh, {id, ver}) {
   const e = await findEntry(gh, id, ver);
   const [start, end] = e.span;
   await gh.write(e.path, e.text.slice(0, start) + e.text.slice(end), e.ver, `刪除動態 ${heading(e.date, e.time)}`);
+}
+
+// ---- 圖片（和 build.py 的 image_ext / save_image 相同） ----
+
+// 看檔案開頭判斷圖片格式（不相信瀏覽器說的類型）；不是 JPG、PNG、GIF、WebP 就回傳空字串
+function imageExt(bytes) {
+  const head = String.fromCharCode(...bytes.subarray(0, 12));
+  return head.startsWith("\xff\xd8\xff") ? "jpg" : head.startsWith("\x89PNG") ? "png" : head.startsWith("GIF8") ? "gif"
+    : head.startsWith("RIFF") && head.slice(8, 12) === "WEBP" ? "webp" : "";
+}
+
+// 存一張圖片，回傳內文用的網址 /img/<年>/<檔名>；檔名取自圖片內容的 SHA-1，同一張圖傳兩次只會存一份
+async function saveImage(gh, {data}) {
+  let bytes;
+  try { bytes = b64bytes(String(data || "")); } catch { throw new UserError("圖片資料不對"); }
+  if (bytes.length > MAX_IMAGE) throw new UserError(`圖片太大，上限 ${MAX_IMAGE / 1024 / 1024} MB`);
+  const ext = imageExt(bytes);
+  if (!ext) throw new UserError("只能上傳 JPG、PNG、GIF、WebP 圖片");
+  const hash = [...new Uint8Array(await crypto.subtle.digest("SHA-1", bytes))].map(b => b.toString(16).padStart(2, "0")).join("");
+  const year = new Date(Date.now() + 8 * 3600e3).getUTCFullYear();  // 台灣時間的年份
+  const name = `${year}/${hash.slice(0, 16)}.${ext}`;
+  await gh.create(`${IMG}/${name}`, toB64(bytes), `上傳圖片 ${name}`);
+  return `/img/${name}`;
 }
