@@ -256,9 +256,9 @@ ADMIN_TEMPLATE = r"""<!DOCTYPE html>
 <meta name="robots" content="noindex">
 <title>編輯 · __HEADING__</title>
 <style>
-  :root { color-scheme:light dark; --bg:#fafaf9; --fg:#1c1917; --muted:#78716c; --line:#e7e5e4; --accent:#b91c1c; --on-accent:#fff; --hl:#fef3c7; }
+  :root { color-scheme:light dark; --bg:#fafaf9; --fg:#1c1917; --muted:#78716c; --line:#e7e5e4; --code:#f5f5f4; --accent:#b91c1c; --on-accent:#fff; --hl:#fef3c7; }
   @media (prefers-color-scheme: dark) {
-    :root { --bg:#1c1917; --fg:#e7e5e4; --muted:#a8a29e; --line:#44403c; --accent:#f87171; --on-accent:#1c1917; --hl:#3f2a12; }
+    :root { --bg:#1c1917; --fg:#e7e5e4; --muted:#a8a29e; --line:#44403c; --code:#292524; --accent:#f87171; --on-accent:#1c1917; --hl:#3f2a12; }
   }
   * { box-sizing:border-box; }
   body { margin:0; background:var(--bg); color:var(--fg);
@@ -291,7 +291,17 @@ ADMIN_TEMPLATE = r"""<!DOCTYPE html>
   .tools { margin-left:8px; }
   .tools button { font:inherit; font-size:.8rem; padding:0 4px; border:0; background:none; color:var(--muted); cursor:pointer; }
   .tools button:hover { color:var(--accent); text-decoration:underline; }
-  .raw { white-space:pre-wrap; overflow-wrap:anywhere; margin-top:2px; }
+  .body { overflow-wrap:anywhere; }
+  .body > * { margin:.4em 0 0; }
+  .body > :first-child { margin-top:2px; }
+  .body a { color:var(--accent); }
+  .body img { max-width:100%; height:auto; border-radius:6px; }
+  .body blockquote { margin-left:0; margin-right:0; padding:2px 14px; border-left:3px solid var(--line); color:var(--muted); }
+  .body code { background:var(--code); padding:1px 5px; border-radius:4px; font-size:.92em; }
+  .body pre { background:var(--code); padding:12px 16px; border-radius:6px; overflow-x:auto; }
+  .body pre code { padding:0; background:none; }
+  .preview { border:1px dashed var(--line); border-radius:8px; padding:6px 12px 10px; }
+  .preview::before { content:"預覽"; display:block; font-size:.75rem; color:var(--muted); }
   .empty { color:var(--muted); padding:24px 0; }
   @media (max-width: 600px) { .bar { padding:10px 16px; } main { padding:0 16px 30vh; } }
 </style>
@@ -304,11 +314,14 @@ ADMIN_TEMPLATE = r"""<!DOCTYPE html>
   <p class="msg" id="msg" role="status"></p>
   <div id="list"></div>
 </main>
+<script src="/admin/marked.js"></script>
 <script>
 const $ = id => document.getElementById(id);
 const pad = n => String(n).padStart(2, "0");
 const esc = s => String(s).replace(/[&<>"]/g, c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;"}[c]));
 let mode = "", msgTimer;
+// Markdown 排版（和網站一樣，單一換行也會換行）。網站實際是用 Python-Markdown 產生，少數寫法可能略有不同
+const md = t => window.marked ? marked.parse(t, {breaks: true}) : esc(t).replace(/\n/g, "<br>");
 
 function say(text) {
   $("msg").textContent = text;
@@ -336,8 +349,15 @@ function editor(e, onCancel) {
   f.className = "edit-form";
   f.innerHTML = `<textarea placeholder="想說什麼？可以用 Markdown：**粗體**、[連結](網址)、> 引用"></textarea>
     <div class="row"><input type="date" required><input type="time" title="不填就只顯示日期"><span class="sp"></span>
-    ${onCancel ? '<button type="button" class="cancel">取消</button>' : ""}<button>${e ? "儲存" : "發佈"}</button></div>`;
+    ${onCancel ? '<button type="button" class="cancel">取消</button>' : ""}<button>${e ? "儲存" : "發佈"}</button></div>
+    <div class="preview body" hidden></div>`;
   const [ta, day, time] = f.querySelectorAll("textarea, input");
+  const pv = f.querySelector(".preview");
+  const update = () => {  // 邊打字邊預覽；輸入框跟著內容長高
+    ta.rows = Math.max(3, ta.value.split("\n").length + 1);
+    pv.hidden = !ta.value.trim();
+    if (!pv.hidden) pv.innerHTML = md(ta.value);
+  };
   const setNow = () => {
     const d = new Date();
     day.value = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
@@ -345,7 +365,8 @@ function editor(e, onCancel) {
   };
   let touched = !!e;  // 新增時沒動過日期時間，就用按下發佈當下的時間
   if (e) { ta.value = e.body; day.value = e.date; time.value = e.time; } else setNow();
-  ta.rows = Math.max(3, ta.value.split("\n").length + 1);
+  update();
+  ta.addEventListener("input", update);
   day.oninput = time.oninput = () => touched = true;
   ta.onkeydown = ev => { if (ev.key === "Enter" && (ev.ctrlKey || ev.metaKey)) f.requestSubmit(); };
   f.onsubmit = async ev => {
@@ -356,7 +377,7 @@ function editor(e, onCancel) {
     buttons.forEach(b => b.disabled = true);
     try {
       await api("save", {id: e ? e.id : "", ver: e ? e.ver : "", date: day.value, time: time.value, body: ta.value});
-      if (!e) { ta.value = ""; touched = false; }
+      if (!e) { ta.value = ""; touched = false; update(); }
       say(saved());
       await load();
     } catch (err) {
@@ -391,13 +412,13 @@ function render(entries) {
     const label = `${+e.date.slice(5, 7)}/${+e.date.slice(8, 10)}${e.time ? " " + e.time : ""}`;
     el.innerHTML = `<div class="when"><a href="/#${esc(e.id)}" target="_blank" title="在網站上看這則">${label}</a>
       <span class="tools"><button type="button">編輯</button><button type="button">刪除</button></span></div>
-      <div class="raw">${esc(e.body)}</div>`;
-    const raw = el.querySelector(".raw"), tools = el.querySelector(".tools");
+      <div class="body">${md(e.body)}</div>`;
+    const body = el.querySelector(".body"), tools = el.querySelector(".tools");
     const [edit, del] = tools.querySelectorAll("button");
     edit.onclick = () => {
-      const f = editor(e, () => { f.remove(); raw.hidden = tools.hidden = false; });
-      raw.hidden = tools.hidden = true;
-      raw.after(f);
+      const f = editor(e, () => { f.remove(); body.hidden = tools.hidden = false; });
+      body.hidden = tools.hidden = true;
+      body.after(f);
       f.querySelector("textarea").focus();
     };
     del.onclick = async () => {
@@ -558,6 +579,7 @@ def build():
     else:
         guestbook.unlink(missing_ok=True)
     (OUT / "admin" / "index.html").write_text(ADMIN_TEMPLATE.replace("__HEADING__", html.escape(TITLE)), "utf-8")
+    shutil.copyfile(ROOT / "vendor" / "marked.umd.js", OUT / "admin" / "marked.js")  # 編輯頁預覽用的 Markdown 排版（MIT 授權）
     print(f"已產生: {OUT / 'index.html'}（{len(entries)} 則動態）")
 
 

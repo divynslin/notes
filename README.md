@@ -7,6 +7,7 @@
 ## 平常怎麼發文
 
 - **手機或任何電腦：** 打開 https://notes.abee-lin-tw.workers.dev/admin/ ，用 email 驗證碼登入，就能新增、修改、刪除動態。每次存檔都會直接 commit 到 GitHub，網站約 1 分鐘後更新。
+  - 打字時，輸入框下面會即時預覽 Markdown 排版後的樣子。預覽用的是 `vendor/marked.umd.js`（開源的 marked，MIT 授權），網站本身則由 Python-Markdown 產生，少數寫法可能略有不同。
 - **這台電腦：** 先 `git pull`，把線上的修改拉下來，再執行下列其中一個指令：
   - `python build.py --edit`：用瀏覽器編輯，網址是 http://localhost:8000/admin/
   - `python build.py --say 內容`：用現在的時間快速發一則
