@@ -26,7 +26,7 @@ import sys
 import threading
 import urllib.parse
 import webbrowser
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from itertools import groupby
 from pathlib import Path
@@ -39,6 +39,7 @@ TITLE = "AI操作員"  # 網站名稱
 SITE_URL = "https://notes.abee-lin-tw.workers.dev"  # 網站的正式網址（留言板用來對應留言串，RSS 的連結也用這個）
 DISQUS_SHORTNAME = "ai-operator"  # Disqus 網站代號（disqus.com 註冊時取的）；空的就不顯示留言板和每則的留言
 CF_ANALYTICS_TOKEN = ""  # Cloudflare Web Analytics 的 token；空的就不加統計碼（編輯頁一律不加）
+HOME_SIZE = 50  # 首頁放最新的幾則，更早的到月份頁看
 FEED_SIZE = 30  # RSS 放最新的幾則
 MAX_IMAGE = 10 * 1024 * 1024  # 上傳圖片的大小上限（worker.js 也有一份）
 TZ = timezone(timedelta(hours=8))  # 台灣時間：RSS 的發文時間、圖片放哪一年的資料夾
@@ -64,7 +65,17 @@ STYLE = """<style>
   .tab .n { font-size:.8rem; font-weight:normal; margin-left:4px; opacity:.8; }
   .tab.rss { margin-left:auto; font-size:.85rem; }
   main { max-width:760px; margin:0 auto; padding:0 24px 30vh; }
-  .month h2 { font-size:.85rem; font-weight:600; color:var(--muted); margin:28px 0 0; }
+  .month h2, .week h3 { font-size:.85rem; font-weight:600; color:var(--muted); margin:28px 0 0; }
+  .page-h { font-size:1.1rem; margin:24px 0 0; }
+  .page-h .n, .months .n { font-size:.85rem; font-weight:normal; color:var(--muted); margin-left:8px; }
+  .pager { display:flex; justify-content:space-between; gap:16px; margin:20px 0 0; font-size:.9rem; }
+  .pager a, .months a { color:var(--accent); text-decoration:none; }
+  .pager a:hover, .months a:hover { text-decoration:underline; }
+  .year h2 { font-size:1rem; margin:28px 0 10px; }
+  .months { list-style:none; margin:0; padding:0; display:grid; grid-template-columns:repeat(auto-fill, minmax(150px, 1fr)); gap:8px; }
+  .months li { padding:8px 14px; border:1px solid var(--line); border-radius:8px; }
+  .hits-n { color:var(--muted); font-size:.9rem; margin:24px 0 0; }
+  mark { background:var(--hl); color:inherit; border-radius:2px; }
   .entry { position:relative; margin-left:5px; padding:12px 8px 14px 22px; border-left:2px solid var(--line);
            scroll-margin-top:120px; overflow-wrap:anywhere; }
   .entry::before { content:""; position:absolute; left:-7px; top:20px; width:12px; height:12px; border-radius:50%;
@@ -97,41 +108,33 @@ STYLE = """<style>
 </style>
 """
 
+# 動態列表的頁面：首頁 public/index.html（最新 HOME_SIZE 則）、月份頁 public/<年>/<月>/index.html、
+# 彙整 public/archive/index.html；上方的搜尋框搜的是全部動態
 PAGE_TEMPLATE = """<!DOCTYPE html>
 <html lang="zh-Hant">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>__HEADING__</title>
+<title>__PTITLE__</title>
 __META__
 __STYLE__
 </head>
 <body>
 <header><div class="bar">
   <h1>__HEADING__</h1>
-  <input type="search" id="q" placeholder="搜尋動態…">
+  <input type="search" id="q" placeholder="搜尋全部動態…">
   <nav class="tabs">__TABS__</nav>
 </div></header>
 <main>
+<div id="page">
 __ENTRIES__
-<p class="empty" id="none" hidden></p>
+</div>
+<div id="hits" hidden></div>
 </main>
 <script>
+const PREFIX = "__PREFIX__";  // 回到網站根目錄的相對路徑
 __AGO_JS__
-
-const q = document.getElementById("q"), none = document.getElementById("none");
-const entries = [...document.querySelectorAll(".entry")], months = [...document.querySelectorAll(".month")];
-function filter() {
-  const t = q.value.trim().toLowerCase();
-  entries.forEach(e => e.hidden = !!t && !(e.querySelector(".when").firstChild.textContent + " "
-                                           + e.querySelector(".body").textContent).toLowerCase().includes(t));
-  months.forEach(m => m.hidden = !m.querySelector(".entry:not([hidden])"));
-  none.textContent = entries.length ? "沒有符合的動態。" : "還沒有動態。";
-  none.hidden = months.some(m => !m.hidden);
-}
-q.addEventListener("input", filter);
-filter();
-</script>
+__SEARCH_JS__</script>
 __COMMENTS_JS__
 </body>
 </html>
@@ -149,6 +152,58 @@ function ago(t) {
        : days < 365 ? Math.floor(days / 30) + " 個月前" : Math.floor(days / 365) + " 年前";
 }
 document.querySelectorAll(".ago[data-t]").forEach(el => el.textContent = ago(el.dataset.t));
+"""
+
+# 搜尋全部動態：第一次打字時才載入 search.js（每則的 id、日期、純文字），結果列在原本的內容的位置
+SEARCH_JS = r"""
+const q = document.getElementById("q"), page = document.getElementById("page"), hits = document.getElementById("hits");
+const escHtml = s => s.replace(/[&<>"]/g, c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;"}[c]));
+const escRe = s => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+let loading;
+// 用 <script> 載入（不用 fetch），直接雙擊用 file:// 打開也能搜尋
+const loadIndex = () => loading = loading || new Promise((ok, no) => {
+  const s = document.createElement("script");
+  s.src = PREFIX + "search.js";
+  s.onload = ok;
+  s.onerror = () => { loading = null; s.remove(); no(); };
+  document.head.append(s);
+});
+// 從第一個符合的字前面一點開始取一段，符合的字標上底色
+function snippet(text, words) {
+  const lower = text.toLowerCase(), at = words.map(w => lower.indexOf(w)).filter(i => i >= 0);
+  const from = at.length ? Math.max(0, Math.min(...at) - 30) : 0, to = from + 140;
+  const marked = text.slice(from, to).split(new RegExp(`(${words.map(escRe).join("|")})`, "i"))
+                     .map((s, k) => k % 2 ? `<mark>${escHtml(s)}</mark>` : escHtml(s)).join("");
+  return (from ? "…" : "") + marked + (to < text.length ? "…" : "");
+}
+function showHits(failed) {
+  const words = q.value.trim().toLowerCase().split(/\s+/).filter(Boolean);
+  page.hidden = words.length > 0;
+  hits.hidden = !words.length;
+  if (!words.length) return;
+  if (failed) return hits.innerHTML = '<p class="hits-n">搜尋資料載入失敗，請重新整理頁面再試一次。</p>';
+  const found = window.SEARCH.filter(([id, when, text]) => words.every(w => (when + " " + text).toLowerCase().includes(w)));
+  hits.innerHTML = `<p class="hits-n">${found.length ? `找到 ${found.length} 則` : "沒有符合的動態。"}`
+    + `${found.length > 100 ? "，列出最新的 100 則" : ""}</p>`
+    + found.slice(0, 100).map(([id, when, text]) => `<article class="entry"><div class="when">`
+      + `<a href="${PREFIX}${id.slice(0, 4)}/${id.slice(5, 7)}/index.html#${id}">${when}</a></div>`
+      + `<div class="body"><p>${snippet(text, words)}</p></div></article>`).join("");
+}
+q.addEventListener("input", async () => {
+  if (q.value.trim() && !window.SEARCH) {
+    try { await loadIndex(); } catch { return showHits(true); }
+  }
+  showHits();
+});
+if (q.value.trim()) q.dispatchEvent(new Event("input"));  // 按上一頁回來時，瀏覽器可能還留著搜尋的字
+"""
+
+# 首頁才有：舊的連結 /#2026-10-11 那則已經不在首頁的話，跳到它那個月的頁面
+HASH_JS = r"""
+const want = decodeURIComponent(location.hash.slice(1));
+if (/^\d{4}-\d{2}-\d{2}/.test(want) && !document.getElementById(want)) {
+  location.replace(`${want.slice(0, 4)}/${want.slice(5, 7)}/index.html#${want}`);
+}
 """
 
 # Disqus 留言串（留言板和每則動態共用）；每個留言串用 identifier 區分，網址只是 Disqus 顯示用
@@ -227,7 +282,7 @@ __STYLE__
   <nav class="tabs">__TABS__</nav>
 </div></header>
 <main>
-<p class="back"><a href="../../index.html#__ID__">← 回到動態</a></p>
+<p class="back"><a href="../../__BACK__#__ID__">← 回到__BACKNAME__的動態</a></p>
 __ENTRY__
 <h2 class="cmt-h">留言</h2>
 __DISQUS__
@@ -342,6 +397,9 @@ ADMIN_TEMPLATE = r"""<!DOCTYPE html>
   .preview { border:1px dashed var(--line); border-radius:8px; padding:6px 12px 10px; }
   .preview::before { content:"預覽"; display:block; font-size:.75rem; color:var(--muted); }
   .empty { color:var(--muted); padding:24px 0; }
+  .more { margin:24px 0 0 5px; font:inherit; font-size:.9rem; padding:4px 16px; border:1px solid var(--line); border-radius:6px;
+          background:none; color:var(--fg); cursor:pointer; }
+  .more:hover { border-color:var(--accent); color:var(--accent); }
   @media (max-width: 600px) { .bar { padding:10px 16px; } main { padding:0 16px 30vh; } }
 </style>
 </head>
@@ -352,6 +410,7 @@ ADMIN_TEMPLATE = r"""<!DOCTYPE html>
   <div id="new"></div>
   <p class="msg" id="msg" role="status"></p>
   <div id="list"></div>
+  <button type="button" class="more" id="more" hidden></button>
 </main>
 <script src="/admin/marked.js"></script>
 <script>
@@ -634,25 +693,32 @@ function editor(e, onCancel) {
 
 const saved = () => mode === "online" ? "已存檔，網站約 1 分鐘後更新。" : "已存檔，也重新產生了網頁。記得 commit、push 才會上線。";
 
+// 列表先放最新的 PAGE 則，按「顯示更早的動態」再多放 PAGE 則（動態多了，一次全部排版手機會很慢）
+const PAGE = 50;
+let sorted = [], shown = 0, section, ym;
 function render(entries) {
-  const list = $("list");
-  if (!entries.length) { list.innerHTML = '<p class="empty">還沒有動態。</p>'; return; }
-  const sorted = entries.map(e => ({...e, t: e.date + (e.time ? "T" + e.time : "")}))
-                        .sort((a, b) => a.t < b.t ? 1 : a.t > b.t ? -1 : 0);
-  list.innerHTML = "";
-  let section, ym;
-  for (const e of sorted) {
+  sorted = entries.map(e => ({...e, t: e.date + (e.time ? "T" + e.time : "")}))
+                  .sort((a, b) => a.t < b.t ? 1 : a.t > b.t ? -1 : 0);
+  $("list").innerHTML = sorted.length ? "" : '<p class="empty">還沒有動態。</p>';
+  section = ym = undefined;
+  const n = Math.max(shown, PAGE);  // 存檔後重新整理列表，原本展開到哪裡就維持到哪裡
+  shown = 0;
+  showMore(n);
+}
+function showMore(n) {
+  for (const e of sorted.slice(shown, shown + n)) {
     if (e.t.slice(0, 7) !== ym) {
       ym = e.t.slice(0, 7);
       section = document.createElement("section");
       section.className = "month";
       section.innerHTML = `<h2>${ym.slice(0, 4)} 年 ${+ym.slice(5, 7)} 月</h2>`;
-      list.append(section);
+      $("list").append(section);
     }
     const el = document.createElement("article");
     el.className = "entry";
     const label = `${+e.date.slice(5, 7)}/${+e.date.slice(8, 10)}${e.time ? " " + e.time : ""}`;
-    el.innerHTML = `<div class="when"><a href="/#${esc(e.id)}" target="_blank" title="在網站上看這則">${label}</a>
+    const href = `/${e.date.slice(0, 4)}/${e.date.slice(5, 7)}/#${esc(e.id)}`;  // 那個月的頁面
+    el.innerHTML = `<div class="when"><a href="${href}" target="_blank" title="在網站上看這則">${label}</a>
       <span class="tools"><button type="button">編輯</button><button type="button">刪除</button></span></div>
       <div class="body">${md(e.body)}</div>`;
     const body = el.querySelector(".body"), tools = el.querySelector(".tools");
@@ -671,7 +737,11 @@ function render(entries) {
     };
     section.append(el);
   }
+  shown = Math.min(shown + n, sorted.length);
+  $("more").hidden = shown >= sorted.length;
+  $("more").textContent = `顯示更早的動態（還有 ${sorted.length - shown} 則）`;
 }
+$("more").onclick = () => showMore(PAGE);
 
 async function load() {
   const data = await api("entries");
@@ -729,7 +799,7 @@ def load_entries():
 
 def tabs(current, prefix, count):
     """網頁上方的分頁列；prefix 是回到網站根目錄的相對路徑（直接雙擊用 file:// 打開也能換頁）。"""
-    items = [("動態", "index.html", f'<span class="n">{count}</span>')]
+    items = [("動態", "index.html", f'<span class="n">{count}</span>'), ("彙整", "archive/index.html", "")]
     if DISQUS_SHORTNAME:
         items.append(("留言板", "guestbook/index.html", ""))
     return "".join(
@@ -752,8 +822,28 @@ def img_urls(h, prefix):
     return re.sub(r'(src|href)="/img/', lambda m: f'{m[1]}="{prefix}img/', h)
 
 
+def week_of(day):
+    """day（2026-10-24）所在那一週的範圍，週一到週日，只算同一個月的日子，例如「10/19 – 10/25」「10/1 – 10/4」。"""
+    d = date.fromisoformat(day)
+    first = d.replace(day=1)
+    last = (first + timedelta(days=31)).replace(day=1) - timedelta(days=1)
+    start = max(d - timedelta(days=d.weekday()), first)
+    end = min(start + timedelta(days=6 - start.weekday()), last)
+    return f"{d.month}/{start.day}" + (f" – {d.month}/{end.day}" if end != start else "")
+
+
+def month_name(ym):
+    return f"{ym[:4]} 年 {int(ym[5:])} 月"
+
+
+def month_href(ym):
+    """月份頁相對於網站根目錄的路徑，例如 2026/10/index.html。"""
+    return f"{ym[:4]}/{ym[5:]}/index.html"
+
+
 def build():
-    """產生 public/index.html（動態牆，新的排前面）、public/feed.xml（RSS）、public/img/（圖片）、
+    """產生 public/index.html（動態牆，最新 HOME_SIZE 則）、public/<年>/<月>/index.html（每個月的動態，依週分段）、
+    public/archive/index.html（彙整）、public/search.js（搜尋用）、public/feed.xml（RSS）、public/img/（圖片）、
     public/admin/index.html（編輯頁），
     有設定 Disqus 時再加上 public/post/<id>/index.html（每則動態的留言）與 public/guestbook/index.html（留言板）。
     每則留言串的 identifier 是「entry-<動態 id>」，動態 id 由日期時間組成，所以改了動態的日期時間，舊留言就對不上了。"""
@@ -781,42 +871,84 @@ def build():
                 f'<span class="ago" data-t="{e["t"]}"></span></div>\n'
                 f'<div class="body">{img_urls(e["html"], prefix)}</div>{foot}</article>\n')
 
-    def comments_link(e):
+    def comments_link(e, prefix):
         # Disqus 的 count.js 會把連結文字換成留言數（文字在 Disqus 後台 Community → Comment Count Link 設定）
         if not DISQUS_SHORTNAME:
             return ""
-        return (f'<div class="foot"><a class="cmt-toggle" href="post/{e["id"]}/index.html#disqus_thread" '
+        return (f'<div class="foot"><a class="cmt-toggle" href="{prefix}post/{e["id"]}/index.html#disqus_thread" '
                 f'data-disqus-identifier="entry-{e["id"]}" data-url="{SITE_URL}/post/{e["id"]}/" '
                 f'data-title="{html.escape(e["short"])} · {html.escape(TITLE)}">留言</a></div>')
 
-    months = []
-    for ym, group in groupby(entries, key=lambda e: e["t"][:7]):
-        y, m = ym.split("-")
-        items = "".join(article(e, f'<a href="#{e["id"]}">{e["label"]}</a>', comments_link(e)) for e in group)
-        months.append(f'<section class="month"><h2>{y} 年 {int(m)} 月</h2>\n{items}</section>')
-    comments_js = INLINE_COMMENTS_JS.replace("__SHORTNAME__", DISQUS_SHORTNAME) if DISQUS_SHORTNAME else ""
-    page = (
-        PAGE_TEMPLATE.replace("__STYLE__", STYLE)
-        .replace("__META__", head_meta(""))
-        .replace("__HEADING__", html.escape(TITLE))
-        .replace("__TABS__", tabs("動態", "", len(entries)))
-        .replace("__ENTRIES__", "\n".join(months))
-        .replace("__AGO_JS__", AGO_JS)
-        .replace("__COMMENTS_JS__", comments_js)
-    )
-    (OUT / "admin").mkdir(parents=True, exist_ok=True)
-    (OUT / "index.html").write_text(page, "utf-8")
+    def items(group, prefix):
+        return "".join(article(e, f'<a href="#{e["id"]}">{e["label"]}</a>', comments_link(e, prefix), prefix)
+                       for e in group)
 
-    items = []
+    comments_js = INLINE_COMMENTS_JS.replace("__SHORTNAME__", DISQUS_SHORTNAME) if DISQUS_SHORTNAME else ""
+
+    def list_page(path, prefix, title, current, content, extra_js=""):
+        """首頁、月份頁、彙整共用的頁面：上方有搜尋全部動態的搜尋框和分頁列。"""
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            PAGE_TEMPLATE.replace("__STYLE__", STYLE)
+            .replace("__META__", head_meta(prefix))
+            .replace("__PTITLE__", html.escape(title))
+            .replace("__HEADING__", html.escape(TITLE))
+            .replace("__TABS__", tabs(current, prefix, len(entries)))
+            .replace("__PREFIX__", prefix)
+            .replace("__AGO_JS__", AGO_JS)
+            .replace("__SEARCH_JS__", SEARCH_JS + extra_js)
+            .replace("__COMMENTS_JS__", comments_js)
+            .replace("__ENTRIES__", content or '<p class="empty">還沒有動態。</p>'), "utf-8")
+
+    # 首頁：最新 HOME_SIZE 則，依月份分段，最下面連到下一則所在的月份頁
+    home = [f'<section class="month"><h2>{month_name(ym)}</h2>\n{items(group, "")}</section>'
+            for ym, group in groupby(entries[:HOME_SIZE], key=lambda e: e["t"][:7])]
+    if len(entries) > HOME_SIZE:
+        ym = entries[HOME_SIZE]["t"][:7]
+        home.append(f'<nav class="pager"><span></span><a href="{month_href(ym)}">更早的動態：{month_name(ym)} →</a></nav>')
+    list_page(OUT / "index.html", "", TITLE, "動態", "\n".join(home), HASH_JS)
+
+    # 月份頁：那個月的全部動態，依週分段；上下有前後月份的連結。每次整個重建（刪掉的動態，頁面也會一起消失）
+    for d in OUT.glob("[0-9][0-9][0-9][0-9]"):
+        shutil.rmtree(d)
+    months = [(ym, list(group)) for ym, group in groupby(entries, key=lambda e: e["t"][:7])]
+    for k, (ym, group) in enumerate(months):
+        newer, older = months[k - 1][0] if k else "", months[k + 1][0] if k + 1 < len(months) else ""
+        pager = ('<nav class="pager">'
+                 + (f'<a href="../../{month_href(newer)}">← {month_name(newer)}</a>' if newer else "<span></span>")
+                 + (f'<a href="../../{month_href(older)}">{month_name(older)} →</a>' if older else "<span></span>")
+                 + "</nav>") if newer or older else ""
+        weeks = "\n".join(f'<section class="week"><h3>{week}</h3>\n{items(g, "../../")}</section>'
+                          for week, g in groupby(group, key=lambda e: week_of(e["t"][:10])))
+        list_page(OUT / month_href(ym), "../../", f"{month_name(ym)} · {TITLE}", "彙整",
+                  f'<h2 class="page-h">{month_name(ym)}<span class="n">{len(group)} 則</span></h2>\n'
+                  f"{pager}\n{weeks}\n{pager}")
+
+    # 彙整：每年每個月各有幾則
+    years = "\n".join(
+        f'<section class="year"><h2>{y} 年</h2><ul class="months">'
+        + "".join(f'<li><a href="../{month_href(ym)}">{int(ym[5:])} 月</a><span class="n">{len(g)} 則</span></li>'
+                  for ym, g in ms) + "</ul></section>"
+        for y, ms in groupby(months, key=lambda m: m[0][:4]))
+    list_page(OUT / "archive" / "index.html", "../", f"彙整 · {TITLE}", "彙整",
+              years and f'<h2 class="page-h">彙整<span class="n">共 {len(entries)} 則</span></h2>\n{years}')
+
+    # 搜尋用的資料：每則的 id、完整日期、純文字
+    data = [[e["id"], f"{e['t'][:4]}/{e['label']}", e["text"] or "（圖片）"] for e in entries]
+    (OUT / "search.js").write_text(
+        "window.SEARCH = " + json.dumps(data, ensure_ascii=False, separators=(",", ":")) + ";\n", "utf-8")
+
+    feed = []
     for e in entries[:FEED_SIZE]:
-        url = f"{SITE_URL}/post/{e['id']}/" if DISQUS_SHORTNAME else f"{SITE_URL}/#{e['id']}"
+        url = (f"{SITE_URL}/post/{e['id']}/" if DISQUS_SHORTNAME
+               else f"{SITE_URL}/{month_href(e['t'][:7]).removesuffix('index.html')}#{e['id']}")
         when = email.utils.format_datetime(datetime.fromisoformat(e["t"]).replace(tzinfo=TZ))
-        items.append(f"<item>\n<title>{html.escape(e['short'])}</title>\n<link>{url}</link>\n"
-                     f'<guid isPermaLink="true">{url}</guid>\n<pubDate>{when}</pubDate>\n'
-                     f"<description>{html.escape(img_urls(e['html'], SITE_URL + '/'))}</description>\n</item>")
+        feed.append(f"<item>\n<title>{html.escape(e['short'])}</title>\n<link>{url}</link>\n"
+                    f'<guid isPermaLink="true">{url}</guid>\n<pubDate>{when}</pubDate>\n'
+                    f"<description>{html.escape(img_urls(e['html'], SITE_URL + '/'))}</description>\n</item>")
     (OUT / "feed.xml").write_text(
         FEED_TEMPLATE.replace("__HEADING__", html.escape(TITLE)).replace("__SITE__", SITE_URL)
-        .replace("__ITEMS__", "\n".join(items)), "utf-8")
+        .replace("__ITEMS__", "\n".join(feed)), "utf-8")
 
     # 圖片整個重新複製（_src/img/ 刪掉的圖，網站上也跟著消失）
     shutil.rmtree(OUT / "img", ignore_errors=True)
@@ -843,6 +975,8 @@ def build():
                 .replace("__TABS__", tabs("動態", "../../", len(entries)))
                 .replace("__PTITLE__", html.escape(short))
                 .replace("__DESC__", html.escape(text[:120]))
+                .replace("__BACK__", month_href(e["t"][:7]))
+                .replace("__BACKNAME__", f" {month_name(e['t'][:7])}")
                 .replace("__ID__", e["id"])
                 .replace("__ENTRY__", article(e, e["label"], prefix="../../"))
                 .replace("__DISQUS__", disqus(f"{SITE_URL}/post/{e['id']}/", f"entry-{e['id']}", f"{short} · {TITLE}"))
@@ -856,6 +990,7 @@ def build():
             .replace("__DISQUS__", disqus(f"{SITE_URL}/guestbook/", "guestbook", f"留言板 · {TITLE}")), "utf-8")
     else:
         guestbook.unlink(missing_ok=True)
+    (OUT / "admin").mkdir(exist_ok=True)
     (OUT / "admin" / "index.html").write_text(ADMIN_TEMPLATE.replace("__HEADING__", html.escape(TITLE)), "utf-8")
     shutil.copyfile(ROOT / "vendor" / "marked.umd.js", OUT / "admin" / "marked.js")  # 編輯頁預覽用的 Markdown 排版（MIT 授權）
     print(f"已產生: {OUT / 'index.html'}（{len(entries)} 則動態）")

@@ -17,6 +17,16 @@
   改完要 commit、push 才會上線。
 - **直接改原稿：** 每則以 `## 2026-10-17` 或 `## 2026-10-17 21:30` 開頭，內文用一般的 Markdown 寫。改完執行 `python build.py`，就能在 `public/index.html` 預覽。
 
+## 網站的頁面
+
+- **首頁 `/`：** 最新 50 則（`build.py` 的 `HOME_SIZE`），依月份分段。最下面有「更早的動態」，連到下一則所在的月份頁。
+- **月份頁 `/2026/10/`：** 那個月的全部動態，依週分段（週一到週日，只算同一個月的日子，例如「10/1 – 10/4」）。上下有前後月份的連結。
+- **彙整 `/archive/`：** 每年每個月各有幾則，點了到月份頁。
+- **單則頁 `/post/<日期時間>/`：** 一則動態和它的留言，上面有「回到 2026 年 10 月的動態」。
+- **搜尋：** 每頁上方的搜尋框搜的是全部動態，不只這一頁。第一次打字時才載入搜尋資料 `search.js`；空白隔開多個字，要全部符合。結果最多列 100 則，點了到月份頁的那一則。
+- **舊連結：** 以前分享的 `/#2026-10-11` 這種連結，那則不在首頁的話，會自動跳到它的月份頁。
+- **編輯頁：** 先列最新 50 則，下面有「顯示更早的動態」。
+
 ## 圖片
 
 - **存在哪裡：** 圖片 commit 進這個 repo 的 `_src/img/<年>/`，產生網站時複製到 `public/img/`。不用 R2 之類的另外的服務，也不用綁信用卡。
@@ -57,7 +67,7 @@
 
 ## 搜尋引擎
 
-- **首頁、單則頁和留言板：** 允許搜尋引擎收錄。
+- **首頁、月份頁、彙整、單則頁和留言板：** 允許搜尋引擎收錄。
 - **編輯頁 `/admin/`：** 有 `noindex`，不會被收錄。
 
 ## 設定在哪裡
@@ -65,7 +75,7 @@
 | 設定 | 位置 |
 |---|---|
 | Worker 名稱、網站檔案的資料夾、`GITHUB_REPO`、`ACCESS_TEAM`、`ACCESS_AUD` | 這個 repo 的 `wrangler.jsonc` |
-| 網站名稱、網址、Disqus、觀看統計的 token、RSS 則數 | 這個 repo 的 `build.py` 開頭 |
+| 網站名稱、網址、Disqus、觀看統計的 token、首頁和 RSS 的則數 | 這個 repo 的 `build.py` 開頭 |
 | 建置指令 | Cloudflare 後台：Worker（notes）→ Settings → Build |
 | `GITHUB_TOKEN` | Cloudflare 後台：Worker（notes）→ Settings → Variables and Secrets，類型選 Secret |
 | 誰能進 `/admin` | Cloudflare 後台：Zero Trust → Access controls → Applications |
