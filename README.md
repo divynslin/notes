@@ -75,7 +75,7 @@
 | 設定 | 位置 |
 |---|---|
 | Worker 名稱、網站檔案的資料夾、`GITHUB_REPO`、`ACCESS_TEAM`、`ACCESS_AUD` | 這個 repo 的 `wrangler.jsonc` |
-| 網站名稱、網址、Disqus、觀看統計的 token、首頁和 RSS 的則數 | 這個 repo 的 `build.py` 開頭 |
+| 網站名稱、標語、網址、Disqus、觀看統計的 token、首頁和 RSS 的則數 | 這個 repo 的 `build.py` 開頭（`TITLE`、`TAGLINE`…） |
 | 建置指令 | Cloudflare 後台：Worker（notes）→ Settings → Build |
 | `GITHUB_TOKEN` | Cloudflare 後台：Worker（notes）→ Settings → Variables and Secrets，類型選 Secret |
 | 誰能進 `/admin` | Cloudflare 後台：Zero Trust → Access controls → Applications |

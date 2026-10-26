@@ -36,6 +36,7 @@ SRC = ROOT / "_src" / "動態"  # 動態原稿
 IMG = ROOT / "_src" / "img"  # 編輯頁上傳的圖片
 OUT = ROOT / "public"  # 產生的網站（不進 git；wrangler.jsonc 的 assets.directory）
 TITLE = "AI操作員"  # 網站名稱
+TAGLINE = "隨想 點子 記事 有意見有高興有憤怒 歡迎留言 要稱讚要謾罵都歡迎"  # 標語：網站名稱下面、首頁的分頁標題、RSS 的說明
 SITE_URL = "https://notes.abee-lin-tw.workers.dev"  # 網站的正式網址（留言板用來對應留言串，RSS 的連結也用這個）
 DISQUS_SHORTNAME = "ai-operator"  # Disqus 網站代號（disqus.com 註冊時取的）；空的就不顯示留言板和每則的留言
 CF_ANALYTICS_TOKEN = ""  # Cloudflare Web Analytics 的 token；空的就不加統計碼（編輯頁一律不加）
@@ -56,6 +57,8 @@ STYLE = """<style>
   .bar { max-width:760px; margin:0 auto; padding:14px 24px 0; display:flex; flex-wrap:wrap; gap:8px 16px;
          align-items:center; justify-content:space-between; }
   h1 { font-size:1.3rem; margin:0; }
+  .tagline { flex-basis:100%; margin:-6px 0 0; font-size:.85rem; color:var(--muted);
+             word-break:keep-all; overflow-wrap:anywhere; }  /* 只在空白處折行，不把「謾罵」拆開 */
   input[type=search] { flex:1; max-width:280px; min-width:160px; padding:5px 10px; font:inherit; font-size:.9rem;
          border:1px solid var(--line); border-radius:8px; background:var(--bg); color:var(--fg); }
   .tabs { flex-basis:100%; display:flex; }
@@ -77,7 +80,7 @@ STYLE = """<style>
   .hits-n { color:var(--muted); font-size:.9rem; margin:24px 0 0; }
   mark { background:var(--hl); color:inherit; border-radius:2px; }
   .entry { position:relative; margin-left:5px; padding:12px 8px 14px 22px; border-left:2px solid var(--line);
-           scroll-margin-top:120px; overflow-wrap:anywhere; }
+           scroll-margin-top:140px; overflow-wrap:anywhere; }
   .entry::before { content:""; position:absolute; left:-7px; top:20px; width:12px; height:12px; border-radius:50%;
                    background:var(--bg); border:2px solid var(--accent); }
   .entry:target { background:var(--hl); border-radius:0 8px 8px 0; }
@@ -104,7 +107,11 @@ STYLE = """<style>
   .back { margin:20px 0 4px; font-size:.9rem; }
   .back a { color:var(--accent); text-decoration:none; }
   .cmt-h { font-size:1rem; margin:36px 0 8px; }
-  @media (max-width: 600px) { .bar { padding:10px 16px 0; } main { padding:0 16px 30vh; } }
+  @media (max-width: 600px) {
+    .bar { padding:10px 16px 0; } main { padding:0 16px 30vh; }
+    header { position:static; }  /* 手機上標語會折行，上方整塊固定的話太佔畫面，所以跟著捲走 */
+    .entry { scroll-margin-top:12px; }
+  }
 </style>
 """
 
@@ -116,6 +123,7 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>__PTITLE__</title>
+<meta name="description" content="__TAGLINE__">
 __META__
 __STYLE__
 </head>
@@ -123,6 +131,7 @@ __STYLE__
 <header><div class="bar">
   <h1>__HEADING__</h1>
   <input type="search" id="q" placeholder="搜尋全部動態…">
+  <p class="tagline">__TAGLINE__</p>
   <nav class="tabs">__TABS__</nav>
 </div></header>
 <main>
@@ -279,6 +288,7 @@ __STYLE__
 <body>
 <header><div class="bar">
   <h1>__HEADING__</h1>
+  <p class="tagline">__TAGLINE__</p>
   <nav class="tabs">__TABS__</nav>
 </div></header>
 <main>
@@ -306,6 +316,7 @@ __STYLE__
 <body>
 <header><div class="bar">
   <h1>__HEADING__</h1>
+  <p class="tagline">__TAGLINE__</p>
   <nav class="tabs">__TABS__</nav>
 </div></header>
 <main>
@@ -323,7 +334,7 @@ FEED_TEMPLATE = """<?xml version="1.0" encoding="utf-8"?>
 <title>__HEADING__</title>
 <link>__SITE__/</link>
 <atom:link href="__SITE__/feed.xml" rel="self" type="application/rss+xml"/>
-<description>__HEADING__的動態</description>
+<description>__TAGLINE__</description>
 <language>zh-TW</language>
 __ITEMS__
 </channel>
@@ -893,6 +904,7 @@ def build():
             .replace("__META__", head_meta(prefix))
             .replace("__PTITLE__", html.escape(title))
             .replace("__HEADING__", html.escape(TITLE))
+            .replace("__TAGLINE__", html.escape(TAGLINE))
             .replace("__TABS__", tabs(current, prefix, len(entries)))
             .replace("__PREFIX__", prefix)
             .replace("__AGO_JS__", AGO_JS)
@@ -906,7 +918,7 @@ def build():
     if len(entries) > HOME_SIZE:
         ym = entries[HOME_SIZE]["t"][:7]
         home.append(f'<nav class="pager"><span></span><a href="{month_href(ym)}">更早的動態：{month_name(ym)} →</a></nav>')
-    list_page(OUT / "index.html", "", TITLE, "動態", "\n".join(home), HASH_JS)
+    list_page(OUT / "index.html", "", f"{TITLE} - {TAGLINE}" if TAGLINE else TITLE, "動態", "\n".join(home), HASH_JS)
 
     # 月份頁：那個月的全部動態，依週分段；上下有前後月份的連結。每次整個重建（刪掉的動態，頁面也會一起消失）
     for d in OUT.glob("[0-9][0-9][0-9][0-9]"):
@@ -947,7 +959,8 @@ def build():
                     f'<guid isPermaLink="true">{url}</guid>\n<pubDate>{when}</pubDate>\n'
                     f"<description>{html.escape(img_urls(e['html'], SITE_URL + '/'))}</description>\n</item>")
     (OUT / "feed.xml").write_text(
-        FEED_TEMPLATE.replace("__HEADING__", html.escape(TITLE)).replace("__SITE__", SITE_URL)
+        FEED_TEMPLATE.replace("__HEADING__", html.escape(TITLE)).replace("__TAGLINE__", html.escape(TAGLINE or TITLE))
+        .replace("__SITE__", SITE_URL)
         .replace("__ITEMS__", "\n".join(feed)), "utf-8")
 
     # 圖片整個重新複製（_src/img/ 刪掉的圖，網站上也跟著消失）
@@ -972,6 +985,7 @@ def build():
                 POST_TEMPLATE.replace("__STYLE__", STYLE)
                 .replace("__META__", head_meta("../../"))
                 .replace("__HEADING__", html.escape(TITLE))
+                .replace("__TAGLINE__", html.escape(TAGLINE))
                 .replace("__TABS__", tabs("動態", "../../", len(entries)))
                 .replace("__PTITLE__", html.escape(short))
                 .replace("__DESC__", html.escape(text[:120]))
@@ -986,6 +1000,7 @@ def build():
             GUESTBOOK_TEMPLATE.replace("__STYLE__", STYLE)
             .replace("__META__", head_meta("../"))
             .replace("__HEADING__", html.escape(TITLE))
+            .replace("__TAGLINE__", html.escape(TAGLINE))
             .replace("__TABS__", tabs("留言板", "../", len(entries)))
             .replace("__DISQUS__", disqus(f"{SITE_URL}/guestbook/", "guestbook", f"留言板 · {TITLE}")), "utf-8")
     else:
